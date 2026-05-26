@@ -186,8 +186,6 @@ def convert_file(file_path: str, output_dir: str) -> bool:
         print(f"[skip] unsupported TXA version: {version}")
         return False
 
-    os.makedirs(output_dir, exist_ok=True)
-
     index_entries: list[tuple[int, int, str]] = []
 
     offset = 32
@@ -232,6 +230,7 @@ def convert_file(file_path: str, output_dir: str) -> bool:
 
         img = Image.frombytes("RGBA", (width, height), bytes(pixel_bytes))
         png_path = os.path.join(output_dir, f"{name}.png")
+        os.makedirs(os.path.dirname(png_path), exist_ok=True)
         img.save(png_path)
 
         index_entries.append((i, virtual_idx, name))
@@ -314,6 +313,7 @@ def build_txa(source_dir: str, output_path: str, version: int = 2) -> bool:
         head_size += entry_size
     head_size = (head_size + 15) & ~15
 
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(b'\x00' * head_size)
 
@@ -435,7 +435,6 @@ def cmd_pack(args: argparse.Namespace) -> None:
         build_txa(abs_input, args.output, version=args.version)
         return
 
-    os.makedirs(args.output, exist_ok=True)
     found = False
     for entry in sorted(os.listdir(abs_input)):
         sub = os.path.join(abs_input, entry)

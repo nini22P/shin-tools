@@ -33,7 +33,7 @@ def detect_pic_version(file_path: str) -> int:
         return 0
 
 
-def decode_dict_block(data: bytes, w: int, h: int, flags: int) -> Optional[bytearray]:
+def decode_dict_block(data: bytes, w: int, h: int, flags: int, do_swap: bool = True) -> Optional[bytearray]:
     stride = (w + 3) & ~3
 
     if not (flags & 2):
@@ -51,20 +51,63 @@ def decode_dict_block(data: bytes, w: int, h: int, flags: int) -> Optional[bytea
     alpha = data[need:] if (flags & 1) == 0 and need < len(data) else None
 
     pixels = bytearray(w * h * 4)
-    for i in range(w * h):
-        row = i // w
-        col = i % w
-        pi = idx_data[row * stride + col]
-        po = i * 4
-        pixels[po] = pal[pi * 4 + 2]
-        pixels[po + 1] = pal[pi * 4 + 1]
-        pixels[po + 2] = pal[pi * 4]
-        pixels[po + 3] = alpha[row * stride + col] if alpha is not None else pal[pi * 4 + 3]
+    if do_swap:
+        for i in range(w * h):
+            row = i // w
+            col = i % w
+            pi = idx_data[row * stride + col]
+            po = i * 4
+            pixels[po] = pal[pi * 4 + 2]
+            pixels[po + 1] = pal[pi * 4 + 1]
+            pixels[po + 2] = pal[pi * 4]
+            pixels[po + 3] = alpha[row * stride + col] if alpha is not None else pal[pi * 4 + 3]
+    else:
+        for i in range(w * h):
+            row = i // w
+            col = i % w
+            pi = idx_data[row * stride + col]
+            po = i * 4
+            pixels[po] = pal[pi * 4]
+            pixels[po + 1] = pal[pi * 4 + 1]
+            pixels[po + 2] = pal[pi * 4 + 2]
+            pixels[po + 3] = alpha[row * stride + col] if alpha is not None else pal[pi * 4 + 3]
 
     return pixels
 
 
-def encode_dict_block(pixels: bytes, w: int, h: int, flags: int) -> bytes:
+def decode_differential_block(data: bytes, w: int, h: int) -> bytearray:
+    stride = (w * 4 + 0xf) & ~0xf
+    pixels = bytearray(w * h * 4)
+    if h > 0:
+        row_size = w * 4
+        pixels[:row_size] = data[:row_size]
+        off = stride
+        for j in range(1, h):
+            prev_start = (j - 1) * row_size
+            cur_start = j * row_size
+            for i in range(row_size):
+                pixels[cur_start + i] = (pixels[prev_start + i] + data[off + i]) & 0xFF
+            off += stride
+    return pixels
+
+
+def encode_differential_block(pixels: bytes, w: int, h: int) -> bytes:
+    stride = (w * 4 + 0xf) & ~0xf
+    result = bytearray(stride * h)
+    if h > 0:
+        row_size = w * 4
+        result[:row_size] = pixels[:row_size]
+        off = stride
+        for j in range(1, h):
+            prev_start = (j - 1) * row_size
+            cur_start = j * row_size
+            for i in range(row_size):
+                result[off + i] = (pixels[cur_start + i] - pixels[prev_start + i]) & 0xFF
+            off += stride
+    return bytes(result)
+
+
+def encode_dict_block(pixels: bytes, w: int, h: int, flags: int, do_swap: bool = True) -> bytes:
     stride = (w + 3) & ~3
     use_inline_alpha = (flags & 1) != 0
 
@@ -86,9 +129,14 @@ def encode_dict_block(pixels: bytes, w: int, h: int, flags: int) -> bytes:
 
     pal_bytes = bytearray(1024)
     for i, (r, g, b, a) in enumerate(palette_order):
-        pal_bytes[i * 4] = b
-        pal_bytes[i * 4 + 1] = g
-        pal_bytes[i * 4 + 2] = r
+        if do_swap:
+            pal_bytes[i * 4] = b
+            pal_bytes[i * 4 + 1] = g
+            pal_bytes[i * 4 + 2] = r
+        else:
+            pal_bytes[i * 4] = r
+            pal_bytes[i * 4 + 1] = g
+            pal_bytes[i * 4 + 2] = b
         pal_bytes[i * 4 + 3] = a
 
     indices = bytearray(stride * h)
@@ -263,6 +311,7 @@ def _pack_v1(png_path: str, output_path: str) -> bool:
         out.extend(b'\x00')
     out.extend(chunks_out)
 
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(out)
 
@@ -321,6 +370,84 @@ def _pack_v0(png_path: str, output_path: str) -> bool:
         out.extend(b'\x00')
     out.extend(chunks_out)
 
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'wb') as f:
+        f.write(out)
+
+    print(f"{os.path.abspath(png_path)} -> {os.path.abspath(output_path)}")
+    return True
+
+
+def _pack_v2(png_path: str, output_path: str) -> bool:
+    img = Image.open(png_path).convert("RGBA")
+    w, h = img.size
+    ox = w // 2
+    oy = h // 2
+
+    blocks = slice_blocks(img)
+
+    encoded_fragments = []
+    for info in blocks:
+        tw, th = info['w'], info['h']
+        tile = img.crop((info['bx'], info['by'], info['bx'] + tw, info['by'] + th))
+        pixels = tile.tobytes()
+
+        t_flags = info['t_flags']
+        try:
+            enc_data = encode_dict_block(pixels, tw, th, t_flags, do_swap=False)
+        except ValueError:
+            try:
+                enc_data = encode_dict_block(pixels, tw, th, 2, do_swap=False)
+                t_flags = 2
+            except ValueError:
+                enc_data = encode_differential_block(pixels, tw, th)
+                t_flags = 1
+
+        compressed = lz77.compress(enc_data, offset_bits=12)
+        comp_size = len(compressed)
+        comp_size = comp_size if comp_size < len(enc_data) and comp_size <= 0xFFFF else 0
+
+        vert_count = info['op_verts'] + info['tr_verts']
+        data_off_no_align = 20 + vert_count * 8
+        data_align = (0x10 - data_off_no_align % 0x10) % 0x10
+        alignment = data_align // 2
+
+        frag = bytearray()
+        frag.extend(struct.pack("<HHHHHHHHHH",
+            t_flags, info['op_verts'], info['tr_verts'], alignment,
+            info['off_x'], info['off_y'], tw, th,
+            comp_size, 0))
+        mask_rect = struct.pack("<HHHH", 0, 0, tw - 2, th - 2)
+        frag.extend(mask_rect * vert_count)
+        frag.extend(b'\x00' * data_align)
+        if comp_size > 0:
+            frag.extend(compressed)
+        else:
+            frag.extend(enc_data)
+
+        encoded_fragments.append((info['bx'], info['by'], frag))
+
+    header_size = 32 + len(encoded_fragments) * 12
+    chunk_start = (header_size + 15) // 16 * 16
+
+    out = bytearray()
+    out.extend(b"PIC4")
+    out.extend(b'\x00' * 28)
+    for _ in range(len(encoded_fragments)):
+        out.extend(b'\x00' * 12)
+    while len(out) < chunk_start:
+        out.extend(b'\x00')
+
+    for i, (bx, by, frag_data) in enumerate(encoded_fragments):
+        offset = len(out)
+        out.extend(frag_data)
+        entry_off = 32 + i * 12
+        out[entry_off:entry_off + 12] = struct.pack("<HHII", bx, by, offset, len(frag_data))
+
+    file_size = len(out)
+    out[4:32] = struct.pack("<IIHHHHIII", 2, file_size, ox, oy, w, h, 1, len(encoded_fragments), 0)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(out)
 
@@ -357,6 +484,10 @@ def _unpack_v1(file_path: str, output_path: str) -> bool:
                 continue
 
             flags, op_verts, tr_verts, alignment, off_x, off_y, w, h, comp_size = struct.unpack("<HHHHHHHHI", tile_data)
+
+            if w > effective_width or h > effective_height:
+                print(f"[warn] Block {i} ({bx},{by}) at offset {offset}: suspicious header (w={w} h={h} op={op_verts} tr={tr_verts} flags={flags:#06x} comp={comp_size}), file may be corrupted")
+                continue
 
             skip = (op_verts + tr_verts) * 8 + (alignment * 2)
             f.seek(skip, 1)
@@ -396,9 +527,13 @@ def _unpack_v1(file_path: str, output_path: str) -> bool:
                 except ValueError as e:
                     print(f"[warn] Block {i} ({bx},{by}): image build failed: {e}")
 
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path)
-        print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
-        return True
+        if processed_blocks < block_count:
+            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed_blocks}/{block_count} blocks, some skipped]")
+        else:
+            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
+        return processed_blocks > 0
 
 
 def _unpack_v0(file_path: str, output_path: str) -> bool:
@@ -429,6 +564,10 @@ def _unpack_v0(file_path: str, output_path: str) -> bool:
                 continue
 
             flags, op_verts, tr_verts, alignment, off_x, off_y, w, h, comp_size = struct.unpack("<HHHHHHHHI", tile_data)
+
+            if w > width or h > height:
+                print(f"[warn] Block {i} ({bx},{by}) at offset {offset}: suspicious header (w={w} h={h} op={op_verts} tr={tr_verts} flags={flags:#06x} comp={comp_size}), file may be corrupted")
+                continue
 
             skip = (op_verts + tr_verts) * 8 + (alignment * 2)
             f.seek(skip, 1)
@@ -468,9 +607,94 @@ def _unpack_v0(file_path: str, output_path: str) -> bool:
                 except ValueError as e:
                     print(f"[warn] Block {i} ({bx},{by}): image build failed: {e}")
 
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path)
-        print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
-        return True
+        if processed_blocks < block_count:
+            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed_blocks}/{block_count} blocks, some skipped]")
+        else:
+            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
+        return processed_blocks > 0
+
+
+def _unpack_v2(file_path: str, output_path: str) -> bool:
+    file_size = os.path.getsize(file_path)
+
+    with open(file_path, 'rb') as f:
+        if f.read(4) != b"PIC4":
+            print(f"[skip] not a PIC4 file: {os.path.abspath(file_path)}")
+            return False
+
+        buf = f.read(28)
+        if len(buf) < 28:
+            print(f"[skip] {os.path.abspath(file_path)}: file too small for v2 header")
+            return False
+
+        fields = struct.unpack("<IIHHHHIII", buf)
+        version, file_size_h, origin_x, origin_y, ew, eh, field20, entry_count, picture_id = fields
+
+        entries = []
+        for _ in range(entry_count):
+            buf = f.read(12)
+            if len(buf) < 12:
+                break
+            x, y, data_off, data_size = struct.unpack("<HHII", buf)
+            entries.append((x, y, data_off, data_size))
+
+        img = Image.new("RGBA", (ew, eh))
+        processed = 0
+
+        for x, y, data_off, data_size in entries:
+            if data_off >= file_size or data_size == 0:
+                continue
+            f.seek(data_off)
+            fragment_data = f.read(data_size)
+            if len(fragment_data) < 20:
+                print(f"[warn] Fragment ({x},{y}) at offset {data_off}: too small ({len(fragment_data)} bytes), skipping")
+                continue
+
+            frag_hdr = struct.unpack("<HHHHHHHHHH", fragment_data[:20])
+            flags, op_verts, tr_verts, alignment, off_x, off_y, w, h, comp_size, unknown = frag_hdr
+
+            if w > ew or h > eh:
+                print(f"[warn] Fragment ({x},{y}) at offset {data_off}: suspicious header (w={w} h={h} op={op_verts} tr={tr_verts} flags={flags:#06x} comp={comp_size}), file may be corrupted")
+                continue
+
+            skip = (op_verts + tr_verts) * 8 + alignment * 2
+            data_start = 20 + skip
+
+            if data_start >= len(fragment_data):
+                continue
+
+            if comp_size > 0:
+                data_block = fragment_data[data_start:data_start + comp_size]
+                try:
+                    dec_data = lz77.decompress(data_block, seek_bits=12, backseek_nbyte=2)
+                except Exception as e:
+                    print(f"[warn] Fragment ({x},{y}): decompress failed: {e}")
+                    continue
+            else:
+                dec_data = fragment_data[data_start:]
+
+            if flags & 2 == 0:
+                pixel_bytes = decode_differential_block(dec_data, w, h)
+            else:
+                pixel_bytes = decode_dict_block(dec_data, w, h, flags, do_swap=False)
+
+            if pixel_bytes:
+                try:
+                    tile_img = Image.frombytes("RGBA", (w, h), bytes(pixel_bytes))
+                    img.paste(tile_img, (x, y))
+                    processed += 1
+                except Exception as e:
+                    print(f"[warn] Fragment ({x},{y}): image build failed: {e}")
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        img.save(output_path)
+        if processed < len(entries):
+            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed}/{len(entries)} fragments, some skipped]")
+        else:
+            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
+        return processed > 0
 
 
 def convert_file(file_path: str, output_path: str) -> bool:
@@ -482,15 +706,22 @@ def convert_file(file_path: str, output_path: str) -> bool:
 
     if version == 0:
         return _unpack_v0(file_path, output_path)
-    else:
+    elif version == 1:
         return _unpack_v1(file_path, output_path)
+    elif version == 2:
+        return _unpack_v2(file_path, output_path)
+    else:
+        print(f"[skip] unsupported PIC version: {version}")
+        return False
 
 
 def pack_file_auto(png_path: str, output_path: str, pic_version: int) -> bool:
     if pic_version == 0:
         return _pack_v0(png_path, output_path)
-    else:
+    elif pic_version == 1:
         return _pack_v1(png_path, output_path)
+    else:
+        return _pack_v2(png_path, output_path)
 
 
 def process_unpack(input_path: str, output_path: str) -> None:
@@ -506,8 +737,6 @@ def process_unpack(input_path: str, output_path: str) -> None:
 
     elif os.path.isdir(abs_input):
         output_dir = output_path
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
 
         print(f"output dir: {output_dir}")
 
@@ -517,7 +746,11 @@ def process_unpack(input_path: str, output_path: str) -> None:
                 if file.lower().endswith(".pic"):
                     src = os.path.join(root, file)
                     name = os.path.splitext(file)[0]
-                    dst = os.path.join(output_dir, name + ".png")
+                    rel = os.path.relpath(root, abs_input)
+                    if rel == '.':
+                        dst = os.path.join(output_dir, name + ".png")
+                    else:
+                        dst = os.path.join(output_dir, rel, name + ".png")
                     tasks.append((src, dst))
 
         count = 0
@@ -548,18 +781,21 @@ def process_pack(input_path: str, output_path: str, pic_version: int = 1) -> Non
 
     elif os.path.isdir(abs_input):
         output_dir = output_path
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
 
         print(f"output dir: {output_dir}")
 
         tasks = []
-        for file in os.listdir(abs_input):
-            if file.lower().endswith(".png"):
-                png_path = os.path.join(abs_input, file)
-                name = os.path.splitext(file)[0]
-                dst = os.path.join(output_dir, name + ".pic")
-                tasks.append((png_path, dst))
+        for root, dirs, files in os.walk(abs_input):
+            for file in files:
+                if file.lower().endswith(".png"):
+                    src = os.path.join(root, file)
+                    name = os.path.splitext(file)[0]
+                    rel = os.path.relpath(root, abs_input)
+                    if rel == '.':
+                        dst = os.path.join(output_dir, name + ".pic")
+                    else:
+                        dst = os.path.join(output_dir, rel, name + ".pic")
+                    tasks.append((src, dst))
 
         count = 0
         if len(tasks) > 1:
@@ -595,8 +831,8 @@ if __name__ == "__main__":
     pack_p = sub.add_parser("pack", help="Convert PNG to PIC")
     pack_p.add_argument("-i", "--input", required=True, help="Input .png file or directory")
     pack_p.add_argument("-o", "--output", required=True, help="Output .pic file or directory")
-    pack_p.add_argument("-v", "--version", type=int, choices=[0, 1], required=True,
-                        help="PIC version: 0, 1")
+    pack_p.add_argument("-v", "--version", type=int, choices=[0, 1, 2], required=True,
+                        help="PIC version: 0, 1, 2")
 
     args = parser.parse_args()
 
