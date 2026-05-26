@@ -436,14 +436,15 @@ def cmd_pack(args: argparse.Namespace) -> None:
         return
 
     found = False
-    for entry in sorted(os.listdir(abs_input)):
-        sub = os.path.join(abs_input, entry)
-        if os.path.isdir(sub) and _dir_has_index(sub):
-            out_path = os.path.join(args.output, f"{entry}.txa")
-            build_txa(sub, out_path, version=args.version)
+    for root, dirs, _ in os.walk(abs_input):
+        if _dir_has_index(root):
+            rel = os.path.relpath(root, abs_input)
+            out_path = os.path.join(args.output, f"{rel}.txa")
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            build_txa(root, out_path, version=args.version)
             found = True
     if not found:
-        print("[error] no subdirectories with index.txt found")
+        print("[error] no directories with index.txt found")
 
 
 def main() -> None:
