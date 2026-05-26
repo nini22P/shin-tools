@@ -178,10 +178,8 @@ def convert_file(file_path: str, output_dir: str) -> bool:
 
     if version == 0:
         entry_hdr_size = 16
-        print(f"[{os.path.abspath(file_path)}] TXA v0")
     elif version in (1, 2):
         entry_hdr_size = 16 if version == 1 else 20
-        print(f"[{os.path.abspath(file_path)}] TXA v{version}")
     else:
         print(f"[skip] unsupported TXA version: {version}")
         return False
@@ -240,7 +238,7 @@ def convert_file(file_path: str, output_dir: str) -> bool:
         for pos, vidx, name in index_entries:
             f.write(f"{pos:03d} -> {vidx:03d} \"{name}\"\n")
 
-    print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_dir)}")
+    print(f"[v{version}] {os.path.abspath(file_path)} -> {os.path.abspath(output_dir)}")
     return True
 
 
@@ -300,8 +298,7 @@ def build_txa(source_dir: str, output_path: str, version: int = 2) -> bool:
 
     use_dict = all(eligible_for_dict(e[3]) for e in entries)
     mode_str = "palette" if use_dict else "diff"
-    print(f"TXA v{version}  mode={mode_str} ({len(entries)} textures)")
-    print(f"{os.path.abspath(source_dir)} -> {os.path.abspath(output_path)}")
+    print(f"[v{version}] {os.path.abspath(source_dir)} -> {os.path.abspath(output_path)}  [{mode_str}, {len(entries)} textures]")
 
     entry_hdr_size = 16 if version in (0, 1) else 20
 

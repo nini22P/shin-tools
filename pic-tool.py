@@ -259,6 +259,65 @@ def _write_chunk_header(data: bytearray, info: dict, comp_size: int, tw: int, th
     return alignment
 
 
+def _pack_v0(png_path: str, output_path: str) -> bool:
+    img = Image.open(png_path).convert("RGBA")
+    w, h = img.size
+
+    blocks = slice_blocks(img)
+
+    chunks_out = bytearray()
+    chunk_writers: list[tuple[int, int, int]] = []
+    header_size = 24 + len(blocks) * 8
+    chunk_start = (header_size + 15) // 16 * 16
+
+    for info in blocks:
+        cur = chunk_start + len(chunks_out)
+        aligned = (cur + 15) // 16 * 16
+        if aligned > cur:
+            chunks_out.extend(b'\x00' * (aligned - cur))
+
+        tw, th = info['w'], info['h']
+        tile = img.crop((info['bx'], info['by'], info['bx'] + tw, info['by'] + th))
+        pixels = bytearray(tile.tobytes())
+
+        try:
+            enc_data = encode_dict_block(bytes(pixels), tw, th, info['t_flags'])
+        except ValueError:
+            tile = tile.quantize(256, method=Image.Quantize.FASTOCTREE).convert("RGBA")
+            pixels = tile.tobytes()
+            enc_data = encode_dict_block(pixels, tw, th, info['t_flags'])
+
+        compressed = lz77_v0.compress_v0(enc_data)
+        comp_size = len(compressed)
+        comp_size = comp_size if comp_size < len(enc_data) and comp_size <= 0xFFFF else 0
+
+        chunk_writers.append((info['bx'], info['by'], chunk_start + len(chunks_out)))
+        _write_chunk_header(chunks_out, info, comp_size, tw, th)
+        if comp_size > 0:
+            chunks_out.extend(compressed)
+        else:
+            chunks_out.extend(enc_data)
+
+    file_size = chunk_start + len(chunks_out)
+
+    out = bytearray()
+    out.extend(b"PIC4")
+    ox, oy = w // 2, h // 2
+    out.extend(struct.pack("<IhhHHII", file_size, ox, oy, w, h, 1, len(blocks)))
+    for bx, by, off in chunk_writers:
+        out.extend(struct.pack("<HHI", bx, by, off))
+    while len(out) % 16 != 0:
+        out.extend(b'\x00')
+    out.extend(chunks_out)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'wb') as f:
+        f.write(out)
+
+    print(f"{os.path.abspath(png_path)} -> {os.path.abspath(output_path)}")
+    return True
+
+
 def _pack_v1(png_path: str, output_path: str) -> bool:
     img = Image.open(png_path).convert("RGBA")
     w, h = img.size
@@ -307,65 +366,6 @@ def _pack_v1(png_path: str, output_path: str) -> bool:
     out.extend(struct.pack("<IIhhHHIII", 1, file_size, ox, oy, w, h, 1, len(blocks), 0))
     for bx, by, off in chunk_writers:
         out.extend(struct.pack("<HHII", bx, by, off, 0))
-    while len(out) % 16 != 0:
-        out.extend(b'\x00')
-    out.extend(chunks_out)
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'wb') as f:
-        f.write(out)
-
-    print(f"{os.path.abspath(png_path)} -> {os.path.abspath(output_path)}")
-    return True
-
-
-def _pack_v0(png_path: str, output_path: str) -> bool:
-    img = Image.open(png_path).convert("RGBA")
-    w, h = img.size
-
-    blocks = slice_blocks(img)
-
-    chunks_out = bytearray()
-    chunk_writers: list[tuple[int, int, int]] = []
-    header_size = 24 + len(blocks) * 8
-    chunk_start = (header_size + 15) // 16 * 16
-
-    for info in blocks:
-        cur = chunk_start + len(chunks_out)
-        aligned = (cur + 15) // 16 * 16
-        if aligned > cur:
-            chunks_out.extend(b'\x00' * (aligned - cur))
-
-        tw, th = info['w'], info['h']
-        tile = img.crop((info['bx'], info['by'], info['bx'] + tw, info['by'] + th))
-        pixels = bytearray(tile.tobytes())
-
-        try:
-            enc_data = encode_dict_block(bytes(pixels), tw, th, info['t_flags'])
-        except ValueError:
-            tile = tile.quantize(256, method=Image.Quantize.FASTOCTREE).convert("RGBA")
-            pixels = tile.tobytes()
-            enc_data = encode_dict_block(pixels, tw, th, info['t_flags'])
-
-        compressed = lz77_v0.compress_v0(enc_data)
-        comp_size = len(compressed)
-        comp_size = comp_size if comp_size < len(enc_data) and comp_size <= 0xFFFF else 0
-
-        chunk_writers.append((info['bx'], info['by'], chunk_start + len(chunks_out)))
-        _write_chunk_header(chunks_out, info, comp_size, tw, th)
-        if comp_size > 0:
-            chunks_out.extend(compressed)
-        else:
-            chunks_out.extend(enc_data)
-
-    file_size = chunk_start + len(chunks_out)
-
-    out = bytearray()
-    out.extend(b"PIC4")
-    ox, oy = w // 2, h // 2
-    out.extend(struct.pack("<IhhHHII", file_size, ox, oy, w, h, 1, len(blocks)))
-    for bx, by, off in chunk_writers:
-        out.extend(struct.pack("<HHI", bx, by, off))
     while len(out) % 16 != 0:
         out.extend(b'\x00')
     out.extend(chunks_out)
@@ -455,85 +455,88 @@ def _pack_v2(png_path: str, output_path: str) -> bool:
     return True
 
 
-def _unpack_v1(file_path: str, output_path: str) -> bool:
-    file_size = os.path.getsize(file_path)
+def _pack_v3(png_path: str, output_path: str) -> bool:
+    img = Image.open(png_path).convert("RGBA")
+    w, h = img.size
+    ox = w // 2
+    oy = h // 2
 
-    with open(file_path, 'rb') as f:
-        if f.read(4) != b"PIC4":
-            print(f"[skip] not a PIC4 file: {os.path.abspath(file_path)}")
-            return False
+    blocks = slice_blocks(img)
 
-        header = struct.unpack("<IIhhHHIII", f.read(28))
-        version, _, origin_x, origin_y, effective_width, effective_height, flags, block_count, crc = header
+    encoded_fragments = []
+    for info in blocks:
+        tw, th = info['w'], info['h']
+        tile = img.crop((info['bx'], info['by'], info['bx'] + tw, info['by'] + th))
+        pixels = tile.tobytes()
 
-        blocks = []
-        for _ in range(block_count):
-            x, y, offset, _ = struct.unpack("<HHII", f.read(12))
-            blocks.append((x, y, offset))
+        t_flags = info['t_flags']
+        try:
+            enc_data = encode_dict_block(pixels, tw, th, t_flags, do_swap=False)
+        except ValueError:
+            try:
+                enc_data = encode_dict_block(pixels, tw, th, 2, do_swap=False)
+                t_flags = 2
+            except ValueError:
+                enc_data = encode_differential_block(pixels, tw, th)
+                t_flags = 1
 
-        img = Image.new("RGBA", (effective_width, effective_height))
-        processed_blocks = 0
+        compressed = lz77.compress(enc_data, offset_bits=12)
+        comp_size = len(compressed)
+        comp_size = comp_size if comp_size < len(enc_data) and comp_size <= 0xFFFF else 0
 
-        for i, (bx, by, offset) in enumerate(blocks):
-            if offset >= file_size:
-                continue
-            f.seek(offset)
+        vert_count = info['op_verts'] + info['tr_verts']
+        data_off_no_align = 20 + vert_count * 8
+        data_align = (0x10 - data_off_no_align % 0x10) % 0x10
+        alignment = data_align // 2
 
-            tile_data = f.read(20)
-            if len(tile_data) < 20:
-                continue
-
-            flags, op_verts, tr_verts, alignment, off_x, off_y, w, h, comp_size = struct.unpack("<HHHHHHHHI", tile_data)
-
-            if w > effective_width or h > effective_height:
-                print(f"[warn] Block {i} ({bx},{by}) at offset {offset}: suspicious header (w={w} h={h} op={op_verts} tr={tr_verts} flags={flags:#06x} comp={comp_size}), file may be corrupted")
-                continue
-
-            skip = (op_verts + tr_verts) * 8 + (alignment * 2)
-            f.seek(skip, 1)
-
-            if comp_size > 0:
-                data_len = comp_size
-            else:
-                next_offset = blocks[i + 1][2] if i < block_count - 1 else file_size
-                data_len = next_offset - offset - 20 - skip
-
-            if data_len <= 0:
-                continue
-
-            raw_data = f.read(data_len)
-            if not raw_data:
-                continue
-
-            if comp_size > 0:
-                try:
-                    dec_data = lz77.decompress(raw_data, seek_bits=12, backseek_nbyte=2)
-                except Exception as e:
-                    print(f"[warn] Block {i} ({bx},{by}): flags={flags} op_verts={op_verts} tr_verts={tr_verts} align={alignment} off=({off_x},{off_y}) size=({w}x{h}) comp={comp_size} decompress failed: {e}")
-                    continue
-            else:
-                dec_data = raw_data
-
-            if not dec_data:
-                continue
-
-            pixel_bytes = decode_dict_block(dec_data, w, h, flags)
-
-            if pixel_bytes:
-                try:
-                    tile_img = Image.frombytes("RGBA", (w, h), bytes(pixel_bytes))
-                    img.paste(tile_img, (bx, by))
-                    processed_blocks += 1
-                except ValueError as e:
-                    print(f"[warn] Block {i} ({bx},{by}): image build failed: {e}")
-
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        img.save(output_path)
-        if processed_blocks < block_count:
-            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed_blocks}/{block_count} blocks, some skipped]")
+        frag = bytearray()
+        frag.extend(struct.pack("<HHHHHHHHHH",
+            t_flags, info['op_verts'], info['tr_verts'], alignment,
+            info['off_x'], info['off_y'], tw, th,
+            comp_size, 0))
+        mask_rect = struct.pack("<HHHH", 0, 0, tw - 2, th - 2)
+        frag.extend(mask_rect * vert_count)
+        frag.extend(b'\x00' * data_align)
+        if comp_size > 0:
+            frag.extend(compressed)
         else:
-            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
-        return processed_blocks > 0
+            frag.extend(enc_data)
+
+        encoded_fragments.append((info['bx'], info['by'], frag))
+
+    # PIC3 header layout:
+    #   32 bytes base header (same as v2)
+    #   N * 12 bytes entries (N = len(encoded_fragments))
+    #   padding to 16 bytes
+    #   fragment data (16-byte aligned start)
+    entry_count = len(encoded_fragments)
+    header_size = 32 + entry_count * 12
+    chunk_start = (header_size + 15) // 16 * 16
+
+    out = bytearray()
+    out.extend(b"PIC4")
+    out.extend(b'\x00' * 28)
+    for _ in range(entry_count):
+        out.extend(b'\x00' * 12)
+    while len(out) < chunk_start:
+        out.extend(b'\x00')
+
+    for i, (bx, by, frag_data) in enumerate(encoded_fragments):
+        offset = len(out)
+        out.extend(frag_data)
+        frag_size = len(frag_data)
+        entry_off = 32 + i * 12
+        out[entry_off:entry_off + 12] = struct.pack("<IHHI", frag_size, bx, by, offset)
+
+    file_size = len(out)
+    out[4:32] = struct.pack("<IIHHHHIII", 3, file_size, ox, oy, w, h, 1, entry_count, 0)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'wb') as f:
+        f.write(out)
+
+    print(f"{os.path.abspath(png_path)} -> {os.path.abspath(output_path)}")
+    return True
 
 
 def _unpack_v0(file_path: str, output_path: str) -> bool:
@@ -610,9 +613,90 @@ def _unpack_v0(file_path: str, output_path: str) -> bool:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path)
         if processed_blocks < block_count:
-            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed_blocks}/{block_count} blocks, some skipped]")
+            print(f"[v0] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed_blocks}/{block_count} blocks, some skipped]")
         else:
-            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
+            print(f"[v0] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
+        return processed_blocks > 0
+
+
+def _unpack_v1(file_path: str, output_path: str) -> bool:
+    file_size = os.path.getsize(file_path)
+
+    with open(file_path, 'rb') as f:
+        if f.read(4) != b"PIC4":
+            print(f"[skip] not a PIC4 file: {os.path.abspath(file_path)}")
+            return False
+
+        header = struct.unpack("<IIhhHHIII", f.read(28))
+        version, _, origin_x, origin_y, effective_width, effective_height, flags, block_count, crc = header
+
+        blocks = []
+        for _ in range(block_count):
+            x, y, offset, _ = struct.unpack("<HHII", f.read(12))
+            blocks.append((x, y, offset))
+
+        img = Image.new("RGBA", (effective_width, effective_height))
+        processed_blocks = 0
+
+        for i, (bx, by, offset) in enumerate(blocks):
+            if offset >= file_size:
+                continue
+            f.seek(offset)
+
+            tile_data = f.read(20)
+            if len(tile_data) < 20:
+                continue
+
+            flags, op_verts, tr_verts, alignment, off_x, off_y, w, h, comp_size = struct.unpack("<HHHHHHHHI", tile_data)
+
+            if w > effective_width or h > effective_height:
+                print(f"[warn] Block {i} ({bx},{by}) at offset {offset}: suspicious header (w={w} h={h} op={op_verts} tr={tr_verts} flags={flags:#06x} comp={comp_size}), file may be corrupted")
+                continue
+
+            skip = (op_verts + tr_verts) * 8 + (alignment * 2)
+            f.seek(skip, 1)
+
+            if comp_size > 0:
+                data_len = comp_size
+            else:
+                next_offset = blocks[i + 1][2] if i < block_count - 1 else file_size
+                data_len = next_offset - offset - 20 - skip
+
+            if data_len <= 0:
+                continue
+
+            raw_data = f.read(data_len)
+            if not raw_data:
+                continue
+
+            if comp_size > 0:
+                try:
+                    dec_data = lz77.decompress(raw_data, seek_bits=12, backseek_nbyte=2)
+                except Exception as e:
+                    print(f"[warn] Block {i} ({bx},{by}): flags={flags} op_verts={op_verts} tr_verts={tr_verts} align={alignment} off=({off_x},{off_y}) size=({w}x{h}) comp={comp_size} decompress failed: {e}")
+                    continue
+            else:
+                dec_data = raw_data
+
+            if not dec_data:
+                continue
+
+            pixel_bytes = decode_dict_block(dec_data, w, h, flags)
+
+            if pixel_bytes:
+                try:
+                    tile_img = Image.frombytes("RGBA", (w, h), bytes(pixel_bytes))
+                    img.paste(tile_img, (bx, by))
+                    processed_blocks += 1
+                except ValueError as e:
+                    print(f"[warn] Block {i} ({bx},{by}): image build failed: {e}")
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        img.save(output_path)
+        if processed_blocks < block_count:
+            print(f"[v1] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed_blocks}/{block_count} blocks, some skipped]")
+        else:
+            print(f"[v1] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
         return processed_blocks > 0
 
 
@@ -691,13 +775,110 @@ def _unpack_v2(file_path: str, output_path: str) -> bool:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path)
         if processed < len(entries):
-            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed}/{len(entries)} fragments, some skipped]")
+            print(f"[v2] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed}/{len(entries)} fragments, some skipped]")
         else:
-            print(f"{os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
+            print(f"[v2] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
         return processed > 0
 
 
-def convert_file(file_path: str, output_path: str) -> bool:
+def _unpack_v3(file_path: str, output_path: str) -> bool:
+    file_size = os.path.getsize(file_path)
+
+    with open(file_path, 'rb') as f:
+        if f.read(4) != b"PIC4":
+            print(f"[skip] not a PIC4 file: {os.path.abspath(file_path)}")
+            return False
+
+        buf = f.read(28)
+        if len(buf) < 28:
+            print(f"[skip] {os.path.abspath(file_path)}: file too small for v3 header")
+            return False
+
+        fields = struct.unpack("<IIHHHHIII", buf)
+        version, file_size_h, origin_x, origin_y, ew, eh, field20, entry_count, picture_id = fields
+
+        entries = []
+        for _ in range(entry_count):
+            buf = f.read(12)
+            if len(buf) < 12:
+                break
+            frag_size, x, y, data_off = struct.unpack("<IHHI", buf)
+            entries.append((x, y, data_off, frag_size))
+
+        img = Image.new("RGBA", (ew, eh))
+        processed = 0
+
+        for x, y, data_off, _ in entries:
+            if data_off >= file_size:
+                continue
+            f.seek(data_off)
+            frag_hdr_bytes = f.read(20)
+            if len(frag_hdr_bytes) < 20:
+                continue
+
+            frag_hdr = struct.unpack("<HHHHHHHHHH", frag_hdr_bytes)
+            flags, op_verts, tr_verts, alignment, off_x, off_y, w, h, comp_size, unknown = frag_hdr
+
+            if w > ew or h > eh:
+                print(f"[warn] Fragment ({x},{y}) at offset {data_off}: suspicious header (w={w} h={h} op={op_verts} tr={tr_verts} flags={flags:#06x} comp={comp_size}), file may be corrupted")
+                continue
+
+            skip = (op_verts + tr_verts) * 8 + alignment * 2
+            if comp_size > 0:
+                frag_total = 20 + skip + comp_size
+            else:
+                dict_stride = (w + 3) & ~3
+                diff_stride = (w * 4 + 0xf) & ~0xf
+                if flags & 2:
+                    frag_total = 20 + skip + 0x400 + dict_stride * h
+                    if (flags & 1) == 0:
+                        frag_total += dict_stride * h
+                else:
+                    frag_total = 20 + skip + diff_stride * h
+            if frag_total > file_size - data_off:
+                continue
+
+            f.seek(data_off)
+            fragment_data = f.read(frag_total)
+
+            data_start = 20 + skip
+
+            if data_start >= len(fragment_data):
+                continue
+
+            if comp_size > 0:
+                data_block = fragment_data[data_start:data_start + comp_size]
+                try:
+                    dec_data = lz77.decompress(data_block, seek_bits=12, backseek_nbyte=2)
+                except Exception as e:
+                    print(f"[warn] Fragment ({x},{y}): decompress failed: {e}")
+                    continue
+            else:
+                dec_data = fragment_data[data_start:]
+
+            if flags & 2 == 0:
+                pixel_bytes = decode_differential_block(dec_data, w, h)
+            else:
+                pixel_bytes = decode_dict_block(dec_data, w, h, flags, do_swap=False)
+
+            if pixel_bytes:
+                try:
+                    tile_img = Image.frombytes("RGBA", (w, h), bytes(pixel_bytes))
+                    img.paste(tile_img, (x, y))
+                    processed += 1
+                except Exception as e:
+                    print(f"[warn] Fragment ({x},{y}): image build failed: {e}")
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        img.save(output_path)
+        if processed < len(entries):
+            print(f"[v3] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed}/{len(entries)} fragments, some skipped]")
+        else:
+            print(f"[v3] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}")
+        return processed > 0
+
+
+def unpack_file(file_path: str, output_path: str) -> bool:
     try:
         version = detect_pic_version(file_path)
     except (ValueError, OSError) as e:
@@ -710,18 +891,22 @@ def convert_file(file_path: str, output_path: str) -> bool:
         return _unpack_v1(file_path, output_path)
     elif version == 2:
         return _unpack_v2(file_path, output_path)
+    elif version == 3:
+        return _unpack_v3(file_path, output_path)
     else:
         print(f"[skip] unsupported PIC version: {version}")
         return False
 
 
-def pack_file_auto(png_path: str, output_path: str, pic_version: int) -> bool:
+def pack_file(png_path: str, output_path: str, pic_version: int) -> bool:
     if pic_version == 0:
         return _pack_v0(png_path, output_path)
     elif pic_version == 1:
         return _pack_v1(png_path, output_path)
-    else:
+    elif pic_version == 2:
         return _pack_v2(png_path, output_path)
+    else:
+        return _pack_v3(png_path, output_path)
 
 
 def process_unpack(input_path: str, output_path: str) -> None:
@@ -733,7 +918,7 @@ def process_unpack(input_path: str, output_path: str) -> None:
         name = os.path.splitext(os.path.basename(abs_input))[0]
         if not output_path.endswith(".png"):
             out_path = os.path.join(output_path, name + ".png")
-        convert_file(abs_input, out_path)
+        unpack_file(abs_input, out_path)
 
     elif os.path.isdir(abs_input):
         output_dir = output_path
@@ -756,13 +941,13 @@ def process_unpack(input_path: str, output_path: str) -> None:
         count = 0
         if len(tasks) > 1:
             with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-                fut_to_src = {executor.submit(convert_file, src, dst): src for src, dst in tasks}
+                fut_to_src = {executor.submit(unpack_file, src, dst): src for src, dst in tasks}
                 for fut in as_completed(fut_to_src):
                     if fut.result():
                         count += 1
         else:
             for src, dst in tasks:
-                if convert_file(src, dst):
+                if unpack_file(src, dst):
                     count += 1
 
         print(f"processed: {count} file(s)")
@@ -777,7 +962,7 @@ def process_pack(input_path: str, output_path: str, pic_version: int = 1) -> Non
         name = os.path.splitext(os.path.basename(abs_input))[0]
         if not output_path.endswith(".pic"):
             out_path = os.path.join(output_path, name + ".pic")
-        pack_file_auto(abs_input, out_path, pic_version)
+        pack_file(abs_input, out_path, pic_version)
 
     elif os.path.isdir(abs_input):
         output_dir = output_path
@@ -800,13 +985,13 @@ def process_pack(input_path: str, output_path: str, pic_version: int = 1) -> Non
         count = 0
         if len(tasks) > 1:
             with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-                fut_to_name = {executor.submit(pack_file_auto, png, dst, pic_version): png for png, dst in tasks}
+                fut_to_name = {executor.submit(pack_file, png, dst, pic_version): png for png, dst in tasks}
                 for fut in as_completed(fut_to_name):
                     if fut.result():
                         count += 1
         else:
             for png, dst in tasks:
-                if pack_file_auto(png, dst, pic_version):
+                if pack_file(png, dst, pic_version):
                     count += 1
 
         print(f"processed: {count} file(s)")
@@ -831,8 +1016,8 @@ if __name__ == "__main__":
     pack_p = sub.add_parser("pack", help="Convert PNG to PIC")
     pack_p.add_argument("-i", "--input", required=True, help="Input .png file or directory")
     pack_p.add_argument("-o", "--output", required=True, help="Output .pic file or directory")
-    pack_p.add_argument("-v", "--version", type=int, choices=[0, 1, 2], required=True,
-                        help="PIC version: 0, 1, 2")
+    pack_p.add_argument("-v", "--version", type=int, choices=[0, 1, 2, 3], required=True,
+                        help="PIC version: 0, 1, 2, 3")
 
     args = parser.parse_args()
 
