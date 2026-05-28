@@ -45,7 +45,29 @@ def patch_binary(binary_path: str, output_path: str | None, csv_path: str, encod
                 print(f"Warning: Format error at line {i+2}, skipping")
                 continue
 
+            original_text = row.get('text', '').strip()
+
             if not translation:
+                continue
+
+            try:
+                f_bin.seek(offset)
+                raw_original = f_bin.read(max_length)
+            except Exception as e:
+                print(f"Error: Failed to read original data at line {i+2}: {e}")
+                continue
+
+            try:
+                decoded_original = raw_original.decode(encoding)
+            except Exception as e:
+                print(f"Error: Failed to decode original text at line {i+2}: {e}")
+                continue
+
+            if decoded_original.replace('\r\n', '\n') != original_text.replace('\r\n', '\n'):
+                print(f"Error: Original text mismatch at line {i+2}")
+                print(f"  Expected (CSV):  '{original_text}'")
+                print(f"  Actual (binary): '{decoded_original}'")
+                print(f"  Offset: 0x{offset:X}, Length: {max_length}")
                 continue
 
             try:
