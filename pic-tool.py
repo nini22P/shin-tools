@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import struct
 import os
+import binascii
 import argparse
 from io import BytesIO
 from typing import Optional
@@ -213,17 +214,35 @@ def slice_blocks(img: Image.Image) -> list[dict]:
     blocks = []
 
     if bounds and content_ratio <= 0.5:
-        bx = max(0, bounds[0] - 2)
-        by = max(0, bounds[1] - 2)
-        tw = min(w - bx, bounds[2] - bounds[0] + 4)
-        th = min(h - by, bounds[3] - bounds[1] + 4)
-        has_alpha = tile_has_alpha(img, bx, by, tw, th)
-        blocks.append({
-            'bx': bx, 'by': by, 'w': tw, 'h': th,
-            't_flags': 2 if has_alpha else 3,
-            'op_verts': 0, 'tr_verts': 1,
-            'off_x': 0, 'off_y': 0,
-        })
+        bx_base = max(0, bounds[0] - 2)
+        by_base = max(0, bounds[1] - 2)
+        bw_adj = min(w - bx_base, bounds[2] - bounds[0] + 4)
+        bh_adj = min(h - by_base, bounds[3] - bounds[1] + 4)
+
+        if bw_adj > TILE_W or bh_adj > TILE_H:
+            cols = math.ceil(bw_adj / GRID_W)
+            rows = math.ceil(bh_adj / GRID_H)
+            for row in range(rows):
+                for col in range(cols):
+                    bx = bx_base + col * GRID_W
+                    by = by_base + row * GRID_H
+                    tw = min(TILE_W, bx_base + bw_adj - bx + 2)
+                    th = min(TILE_H, by_base + bh_adj - by + 2)
+                    has_alpha = tile_has_alpha(img, bx, by, tw, th)
+                    blocks.append({
+                        'bx': bx, 'by': by, 'w': tw, 'h': th,
+                        't_flags': 2 if has_alpha else 3,
+                        'op_verts': 0, 'tr_verts': 1,
+                        'off_x': 0, 'off_y': 0,
+                    })
+        else:
+            has_alpha = tile_has_alpha(img, bx_base, by_base, bw_adj, bh_adj)
+            blocks.append({
+                'bx': bx_base, 'by': by_base, 'w': bw_adj, 'h': bh_adj,
+                't_flags': 2 if has_alpha else 3,
+                'op_verts': 0, 'tr_verts': 1,
+                'off_x': 0, 'off_y': 0,
+            })
     else:
         cols = math.ceil(w / GRID_W)
         rows = math.ceil(h / GRID_H)
@@ -341,8 +360,9 @@ def _pack_v1(png_path: str, output_path: str) -> bool:
 
     chunks_out = bytearray()
     chunk_writers: list[tuple[int, int, int]] = []
-    header_size = 32 + len(blocks) * 12
+    header_size = 32 + len(blocks) * 8
     chunk_start = (header_size + 15) // 16 * 16
+    crc_data = bytearray()
 
     for info in blocks:
         cur = chunk_start + len(chunks_out)
@@ -366,14 +386,19 @@ def _pack_v1(png_path: str, output_path: str) -> bool:
             chunks_out.extend(compressed)
         else:
             chunks_out.extend(enc_data)
+        crc_data.extend(enc_data)
 
     file_size = chunk_start + len(chunks_out)
 
+    crc = binascii.crc32(crc_data) & 0xFFFFFFFF
+    if crc == 0:
+        crc = 1
+
     out = bytearray()
     out.extend(b"PIC4")
-    out.extend(struct.pack("<IIhhHHIII", 1, file_size, ox, oy, w, h, 1, len(blocks), 0))
+    out.extend(struct.pack("<IIhhHHIII", 1, file_size, ox, oy, w, h, 1, len(blocks), crc))
     for bx, by, off in chunk_writers:
-        out.extend(struct.pack("<HHII", bx, by, off, 0))
+        out.extend(struct.pack("<HHI", bx, by, off))
     while len(out) % 16 != 0:
         out.extend(b'\x00')
     out.extend(chunks_out)
@@ -397,6 +422,7 @@ def _pack_v2(png_path: str, output_path: str) -> bool:
     blocks = slice_blocks(img)
 
     encoded_fragments = []
+    crc_data = bytearray()
     for info in blocks:
         tw, th = info['w'], info['h']
         tile = img.crop((info['bx'], info['by'], info['bx'] + tw, info['by'] + th))
@@ -436,6 +462,11 @@ def _pack_v2(png_path: str, output_path: str) -> bool:
             frag.extend(enc_data)
 
         encoded_fragments.append((info['bx'], info['by'], frag))
+        crc_data.extend(enc_data)
+
+    crc = binascii.crc32(crc_data) & 0xFFFFFFFF
+    if crc == 0:
+        crc = 1
 
     header_size = 32 + len(encoded_fragments) * 12
     chunk_start = (header_size + 15) // 16 * 16
@@ -455,7 +486,7 @@ def _pack_v2(png_path: str, output_path: str) -> bool:
         out[entry_off:entry_off + 12] = struct.pack("<HHII", bx, by, offset, len(frag_data))
 
     file_size = len(out)
-    out[4:32] = struct.pack("<IIHHHHIII", 2, file_size, ox, oy, w, h, 1, len(encoded_fragments), 0)
+    out[4:32] = struct.pack("<IIHHHHIII", 2, file_size, ox, oy, w, h, 1, len(encoded_fragments), crc)
 
     out_dir = os.path.dirname(output_path)
     if out_dir:
@@ -476,6 +507,7 @@ def _pack_v3(png_path: str, output_path: str) -> bool:
     blocks = slice_blocks(img)
 
     encoded_fragments = []
+    crc_data = bytearray()
     for info in blocks:
         tw, th = info['w'], info['h']
         tile = img.crop((info['bx'], info['by'], info['bx'] + tw, info['by'] + th))
@@ -515,6 +547,11 @@ def _pack_v3(png_path: str, output_path: str) -> bool:
             frag.extend(enc_data)
 
         encoded_fragments.append((info['bx'], info['by'], frag))
+        crc_data.extend(enc_data)
+
+    crc = binascii.crc32(crc_data) & 0xFFFFFFFF
+    if crc == 0:
+        crc = 1
 
     # PIC3 header layout:
     #   32 bytes base header (same as v2)
@@ -541,7 +578,7 @@ def _pack_v3(png_path: str, output_path: str) -> bool:
         out[entry_off:entry_off + 12] = struct.pack("<IHHI", frag_size, bx, by, offset)
 
     file_size = len(out)
-    out[4:32] = struct.pack("<IIHHHHIII", 3, file_size, ox, oy, w, h, 1, entry_count, 0)
+    out[4:32] = struct.pack("<IIHHHHIII", 3, file_size, ox, oy, w, h, 1, entry_count, crc)
 
     out_dir = os.path.dirname(output_path)
     if out_dir:
@@ -648,7 +685,7 @@ def _unpack_v1(file_path: str, output_path: str) -> bool:
 
         blocks = []
         for _ in range(block_count):
-            x, y, offset, _ = struct.unpack("<HHII", f.read(12))
+            x, y, offset = struct.unpack("<HHI", f.read(8))
             blocks.append((x, y, offset))
 
         img = Image.new("RGBA", (effective_width, effective_height))
