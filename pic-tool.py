@@ -772,7 +772,7 @@ def _unpack_v2(file_path: str, output_path: str) -> bool:
             return False
 
         fields = struct.unpack("<IIHHHHIII", buf)
-        version, file_size_h, origin_x, origin_y, ew, eh, field20, entry_count, picture_id = fields
+        version, file_size_h, origin_x, origin_y, ew, eh, field20, entry_count, crc = fields
 
         entries = []
         for _ in range(entry_count):
@@ -855,7 +855,7 @@ def _unpack_v3(file_path: str, output_path: str) -> bool:
             return False
 
         fields = struct.unpack("<IIHHHHIII", buf)
-        version, file_size_h, origin_x, origin_y, ew, eh, field20, entry_count, picture_id = fields
+        version, file_size_h, origin_x, origin_y, ew, eh, field20, entry_count, crc = fields
 
         entries = []
         for _ in range(entry_count):
