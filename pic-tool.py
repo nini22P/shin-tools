@@ -4,9 +4,11 @@ import math
 import struct
 import os
 import argparse
+from io import BytesIO
 from typing import Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from PIL import Image
+import pngquant_py
 
 import lz77
 import lz77_v0
@@ -16,6 +18,12 @@ GRID_W = 256
 GRID_H = 128
 TILE_W = 258
 TILE_H = 130
+
+
+def quantize_rgba(png_path: str, colors: int = 256) -> Image.Image:
+    with open(png_path, "rb") as f:
+        out = pngquant_py.quantize(f.read(), speed=1)
+    return Image.open(BytesIO(out)).convert("RGBA")
 
 
 def detect_pic_version(file_path: str) -> int:
@@ -263,6 +271,10 @@ def _pack_v0(png_path: str, output_path: str) -> bool:
     img = Image.open(png_path).convert("RGBA")
     w, h = img.size
 
+    colors = img.getcolors(maxcolors=257)
+    if colors is None or len(colors) > 256:
+        img = quantize_rgba(png_path, 256)
+
     blocks = slice_blocks(img)
 
     chunks_out = bytearray()
@@ -280,12 +292,7 @@ def _pack_v0(png_path: str, output_path: str) -> bool:
         tile = img.crop((info['bx'], info['by'], info['bx'] + tw, info['by'] + th))
         pixels = bytearray(tile.tobytes())
 
-        try:
-            enc_data = encode_dict_block(bytes(pixels), tw, th, info['t_flags'])
-        except ValueError:
-            tile = tile.quantize(256, method=Image.Quantize.FASTOCTREE).convert("RGBA")
-            pixels = tile.tobytes()
-            enc_data = encode_dict_block(pixels, tw, th, info['t_flags'])
+        enc_data = encode_dict_block(bytes(pixels), tw, th, info['t_flags'])
 
         compressed = lz77_v0.compress_v0(enc_data)
         comp_size = len(compressed)
@@ -310,7 +317,9 @@ def _pack_v0(png_path: str, output_path: str) -> bool:
         out.extend(b'\x00')
     out.extend(chunks_out)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(out)
 
@@ -323,6 +332,10 @@ def _pack_v1(png_path: str, output_path: str) -> bool:
     w, h = img.size
     ox = w // 2
     oy = h // 2
+
+    colors = img.getcolors(maxcolors=257)
+    if colors is None or len(colors) > 256:
+        img = quantize_rgba(png_path, 256)
 
     blocks = slice_blocks(img)
 
@@ -341,12 +354,7 @@ def _pack_v1(png_path: str, output_path: str) -> bool:
         tile = img.crop((info['bx'], info['by'], info['bx'] + tw, info['by'] + th))
         pixels = tile.tobytes()
 
-        try:
-            enc_data = encode_dict_block(pixels, tw, th, info['t_flags'])
-        except ValueError:
-            tile = tile.quantize(256, method=Image.Quantize.FASTOCTREE).convert("RGBA")
-            pixels = tile.tobytes()
-            enc_data = encode_dict_block(pixels, tw, th, info['t_flags'])
+        enc_data = encode_dict_block(pixels, tw, th, info['t_flags'])
 
         compressed = lz77.compress(enc_data, offset_bits=12)
         comp_size = len(compressed)
@@ -370,7 +378,9 @@ def _pack_v1(png_path: str, output_path: str) -> bool:
         out.extend(b'\x00')
     out.extend(chunks_out)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(out)
 
@@ -447,7 +457,9 @@ def _pack_v2(png_path: str, output_path: str) -> bool:
     file_size = len(out)
     out[4:32] = struct.pack("<IIHHHHIII", 2, file_size, ox, oy, w, h, 1, len(encoded_fragments), 0)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(out)
 
@@ -531,7 +543,9 @@ def _pack_v3(png_path: str, output_path: str) -> bool:
     file_size = len(out)
     out[4:32] = struct.pack("<IIHHHHIII", 3, file_size, ox, oy, w, h, 1, entry_count, 0)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(out)
 
@@ -610,7 +624,9 @@ def _unpack_v0(file_path: str, output_path: str) -> bool:
                 except ValueError as e:
                     print(f"[warn] Block {i} ({bx},{by}): image build failed: {e}")
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         img.save(output_path)
         if processed_blocks < block_count:
             print(f"[v0] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed_blocks}/{block_count} blocks, some skipped]")
@@ -691,7 +707,9 @@ def _unpack_v1(file_path: str, output_path: str) -> bool:
                 except ValueError as e:
                     print(f"[warn] Block {i} ({bx},{by}): image build failed: {e}")
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         img.save(output_path)
         if processed_blocks < block_count:
             print(f"[v1] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed_blocks}/{block_count} blocks, some skipped]")
@@ -772,7 +790,9 @@ def _unpack_v2(file_path: str, output_path: str) -> bool:
                 except Exception as e:
                     print(f"[warn] Fragment ({x},{y}): image build failed: {e}")
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         img.save(output_path)
         if processed < len(entries):
             print(f"[v2] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed}/{len(entries)} fragments, some skipped]")
@@ -869,7 +889,9 @@ def _unpack_v3(file_path: str, output_path: str) -> bool:
                 except Exception as e:
                     print(f"[warn] Fragment ({x},{y}): image build failed: {e}")
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         img.save(output_path)
         if processed < len(entries):
             print(f"[v3] {os.path.abspath(file_path)} -> {os.path.abspath(output_path)}  [{processed}/{len(entries)} fragments, some skipped]")
