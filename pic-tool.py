@@ -380,13 +380,16 @@ def _pack_v1(png_path: str, output_path: str) -> bool:
         comp_size = len(compressed)
         comp_size = comp_size if comp_size < len(enc_data) and comp_size <= 0xFFFF else 0
 
-        chunk_writers.append((info['bx'], info['by'], chunk_start + len(chunks_out)))
-        _write_chunk_header(chunks_out, info, comp_size, tw, th)
+        block_data = bytearray()
+        _write_chunk_header(block_data, info, comp_size, tw, th)
         if comp_size > 0:
-            chunks_out.extend(compressed)
+            block_data.extend(compressed)
         else:
-            chunks_out.extend(enc_data)
-        crc_data.extend(enc_data)
+            block_data.extend(enc_data)
+
+        chunk_writers.append((info['bx'], info['by'], chunk_start + len(chunks_out)))
+        chunks_out.extend(block_data)
+        crc_data.extend(block_data)
 
     file_size = chunk_start + len(chunks_out)
 
@@ -462,7 +465,7 @@ def _pack_v2(png_path: str, output_path: str) -> bool:
             frag.extend(enc_data)
 
         encoded_fragments.append((info['bx'], info['by'], frag))
-        crc_data.extend(enc_data)
+        crc_data.extend(frag)
 
     crc = binascii.crc32(crc_data) & 0xFFFFFFFF
     if crc == 0:
@@ -547,7 +550,7 @@ def _pack_v3(png_path: str, output_path: str) -> bool:
             frag.extend(enc_data)
 
         encoded_fragments.append((info['bx'], info['by'], frag))
-        crc_data.extend(enc_data)
+        crc_data.extend(frag)
 
     crc = binascii.crc32(crc_data) & 0xFFFFFFFF
     if crc == 0:
