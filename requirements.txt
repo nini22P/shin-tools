@@ -1,0 +1,5 @@
+numpy>=1.24
+numba>=0.57
+Pillow>=10.0
+pngquant-py>=0.1.1
+pandas>=2.0
