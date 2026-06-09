@@ -9,22 +9,103 @@ from typing import Optional
 SEP: str = "⭕"
 RUBY_REGEX: str = r'@b([^@.]+)\.@<([^@>]+)@>'
 ARG_REGEX: str = r'@[abcopsuvwxz][^@\n\r.]*\.'
-NO_ARG_REGEX: str = r'@[+-/<>[\]ekrty{|}]'
+NO_ARG_REGEX: str = r'@[+-/<>[\]ekrtyi{|}]'
 CODE_REGEX: str = f'({ARG_REGEX}|{NO_ARG_REGEX})'
 
 RUBY_PATTERN = re.compile(RUBY_REGEX)
 CODE_PATTERN = re.compile(CODE_REGEX)
 
+SKIP_SOURCES = {"saveinfo", "select_choice", "voiceplay"}
+
+
+def unescaped_to_escaped(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        c = text[i]
+
+        if c == '!':
+            if i + 1 < n:
+                result.append(text[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if c in "abcopsuvwxz":
+            j = i + 1
+            while j < n and text[j] != '.':
+                j += 1
+            if j < n:
+                arg = text[i + 1:j]
+                result.append(f"@{c}{arg}.")
+                i = j + 1
+                continue
+
+        if c in "+-/<>[]ekrtyi{|}":
+            result.append(f"@{c}")
+            i += 1
+            continue
+
+        result.append(c)
+        i += 1
+
+    return "".join(result)
+
+
+def escaped_to_unescaped(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        c = text[i]
+
+        if c == '@' and i + 1 < n:
+            cmd = text[i + 1]
+
+            if cmd in "abcopsuvwxz":
+                j = i + 2
+                while j < n and text[j] != '.':
+                    j += 1
+                if j < n:
+                    arg = text[i + 2:j]
+                    result.append(f"{cmd}{arg}.")
+                    i = j + 1
+                    if i < n and text[i] == ' ':
+                        result.append(' ')
+                        i += 1
+                    continue
+
+            if cmd in "+-/<>[]ekrtyi{|}":
+                result.append(cmd)
+                i += 2
+                if i < n and text[i] == ' ':
+                    result.append(' ')
+                    i += 1
+                continue
+
+        if c == '!' or (c.isascii() and c.isprintable()):
+            result.append('!' + c)
+        else:
+            result.append(c)
+
+        i += 1
+
+    return "".join(result)
+
 
 def to_human(text: str) -> str:
-    return RUBY_PATTERN.sub( r'[\1|\2]', text)
+    return RUBY_PATTERN.sub(r'[\1|\2]', text)
 
 
 def to_game(text: str) -> str:
     return re.sub(r'\[([^|\]]+)\|([^\]]+)\]', r'@b\1.@<\2@>', text)
 
 
-def has_name_box(parts: list[str]) -> bool:
+def has_name(parts: list[str]) -> bool:
     if '@r' not in parts:
         return False
     idx = parts.index('@r')
@@ -36,7 +117,7 @@ def has_name_box(parts: list[str]) -> bool:
 
 def get_segments(text: str) -> list[str]:
     parts = CODE_PATTERN.split(to_human(str(text)))
-    start_idx = parts.index('@r') + 1 if has_name_box(parts) else 0
+    start_idx = parts.index('@r') + 1 if has_name(parts) else 0
 
     segments: list[str] = []
     for p in parts[start_idx:]:
@@ -47,7 +128,7 @@ def get_segments(text: str) -> list[str]:
     return segments
 
 
-def extract_texts(df_main: pd.DataFrame) -> pd.DataFrame:
+def extract_texts(df_main: pd.DataFrame, escaped: bool) -> pd.DataFrame:
     names: set[str] = set()
     rows: list[dict[str, str]] = []
 
@@ -55,11 +136,16 @@ def extract_texts(df_main: pd.DataFrame) -> pd.DataFrame:
         text = str(row.get('s', ''))
         if not text or text == 'nan':
             continue
+        
+        souces = str(row.get('source', ''))
+        
+        if not escaped and souces not in SKIP_SOURCES:
+            text = unescaped_to_escaped(text)
 
         parts = CODE_PATTERN.split(to_human(text))
         name = ""
 
-        if has_name_box(parts):
+        if has_name(parts):
             name = parts[parts.index('@r') - 1].strip()
             if name:
                 names.add(name)
@@ -88,7 +174,69 @@ def extract_texts(df_main: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(name_rows + rows)[cols]
 
 
-def inject_texts(df_main: pd.DataFrame, df_text: pd.DataFrame) -> pd.DataFrame:
+def inject_row(row: pd.Series, trans_dict: dict[tuple[int, str], Optional[list[str]]], name_dict: dict[str, str], escaped: bool = True) -> str:
+    orig_text = str(row.get('s', ''))
+    idx_val = str(row.get('index', ''))
+    offset_val = str(row.get('offset', ''))
+
+    if not idx_val:
+        return orig_text
+
+    try:
+        idx = int(float(idx_val))
+    except ValueError:
+        return orig_text
+
+    key = (idx, offset_val)
+
+    if key not in trans_dict:
+        return ""
+
+    segs = trans_dict[key]
+    if segs is None:
+        return ""
+
+    souces = str(row.get('source', ''))
+    if not escaped and souces not in SKIP_SOURCES:
+        orig_text = unescaped_to_escaped(orig_text)
+
+    parts = CODE_PATTERN.split(to_human(orig_text))
+    result: list[str] = []
+    seg_idx = 0
+    start = 0
+
+    if has_name(parts):
+        r_idx = parts.index('@r')
+        result.extend(parts[:r_idx - 1])
+
+        orig_name = parts[r_idx - 1]
+        name_stripped = orig_name.strip()
+        translated_name = name_dict.get(name_stripped, name_stripped)
+        result.append(orig_name.replace(name_stripped, to_game(translated_name)))
+
+        result.append(parts[r_idx])
+        start = r_idx + 1
+
+    for p in parts[start:]:
+        if not p:
+            continue
+
+        if CODE_PATTERN.match(p):
+                result.append(p)
+        elif p.strip():
+            if seg_idx < len(segs) and segs[seg_idx].strip():
+                translated_text = to_game(segs[seg_idx].strip())
+                result.append(p.replace(p.strip(), translated_text))
+            else:
+                result.append(to_game(p))
+            seg_idx += 1
+        else:
+            result.append(p)
+
+    return "".join(result)
+
+
+def inject_texts(df_main: pd.DataFrame, df_text: pd.DataFrame, escaped: bool) -> pd.DataFrame:
     name_dict: dict[str, str] = {}
     trans_dict: dict[tuple[int, str], Optional[list[str]]] = {}
     errors: list[str] = []
@@ -128,87 +276,31 @@ def inject_texts(df_main: pd.DataFrame, df_text: pd.DataFrame) -> pd.DataFrame:
     if errors:
         raise ValueError("Translation alignment errors:\n" + "\n".join(errors[:10]))
 
-    def process_row(orig_text: str, idx_val: str, offset_val: str) -> str:
-        if not idx_val:
-            return orig_text
-
-        try:
-            idx = int(float(idx_val))
-        except ValueError:
-            return orig_text
-
-        key = (idx, offset_val)
-
-        if key not in trans_dict:
-            return ""
-
-        segs = trans_dict[key]
-        if segs is None:
-            return ""
-
-        seg_idx = 0
-        parts = CODE_PATTERN.split(to_human(orig_text))
-        result: list[str] = []
-        start = 0
-
-        if has_name_box(parts):
-            r_idx = parts.index('@r')
-            result.extend(parts[:r_idx - 1])
-
-            orig_name = parts[r_idx - 1]
-            name_stripped = orig_name.strip()
-            translated_name = name_dict.get(name_stripped, name_stripped)
-            result.append(orig_name.replace(name_stripped, to_game(translated_name)))
-
-            result.append(parts[r_idx])
-            start = r_idx + 1
-
-        for p in parts[start:]:
-            if not p:
-                continue
-
-            if CODE_PATTERN.match(p):
-                result.append(p)
-            elif p.strip():
-                if seg_idx < len(segs) and segs[seg_idx].strip():
-                    translated_text = to_game(segs[seg_idx].strip())
-                    result.append(p.replace(p.strip(), translated_text))
-                else:
-                    result.append(to_game(p))
-                seg_idx += 1
-            else:
-                result.append(p)
-
-        return "".join(result)
-
     df_out = df_main.copy()
     translated: list[str] = []
-    for row in df_main.itertuples(index=False):
-        s_val = getattr(row, 's', None)
-        idx_val = getattr(row, 'index', None)
-        offset_val = getattr(row, 'offset', None)
-        translated.append(process_row(
-            str(s_val) if pd.notna(s_val) else '',
-            str(idx_val) if pd.notna(idx_val) else '',
-            str(offset_val) if pd.notna(offset_val) else '',
-        ))
+    for _, row in df_main.iterrows():
+        text = inject_row(row, trans_dict, name_dict, escaped)
+        souces = str(row.get('source', ''))
+        if not escaped and souces not in SKIP_SOURCES:
+            text = escaped_to_unescaped(text)
+        translated.append(text)
     df_out['translated'] = translated
     return df_out
 
 
-def cmd_export(main_file: str, text_file: str) -> None:
+def cmd_export(main_file: str, text_file: str, escaped: bool) -> None:
     df_main = pd.read_csv(main_file, encoding='utf-8', low_memory=False)
-    df_text = extract_texts(df_main)
+    df_text = extract_texts(df_main, escaped)
     df_text.to_csv(text_file, index=False, encoding='utf-8')
     print(f"Exported to {text_file}")
 
 
-def cmd_import(main_file: str, text_file: str) -> None:
+def cmd_import(main_file: str, text_file: str, escaped: bool) -> None:
     df_main = pd.read_csv(main_file, encoding='utf-8', low_memory=False)
     df_text = pd.read_csv(text_file, encoding='utf-8', dtype=str).fillna("")
 
     try:
-        df_out = inject_texts(df_main, df_text)
+        df_out = inject_texts(df_main, df_text, escaped)
         df_out.to_csv(main_file, index=False, encoding='utf-8')
         print(f"Updated {main_file}")
     except ValueError as e:
@@ -216,15 +308,15 @@ def cmd_import(main_file: str, text_file: str) -> None:
         sys.exit(1)
 
 
-def cmd_test(main_file: str) -> None:
+def cmd_test(main_file: str, escaped: bool) -> None:
     print("Running in-memory loop test...")
     df_main = pd.read_csv(main_file, encoding='utf-8', low_memory=False)
 
-    df_text = extract_texts(df_main)
+    df_text = extract_texts(df_main, escaped)
     df_text['translated'] = df_text['text']
 
     try:
-        df_out = inject_texts(df_main, df_text)
+        df_out = inject_texts(df_main, df_text, escaped)
     except ValueError as e:
         print(f"Test failed during injection:\n{e}")
         return
@@ -243,7 +335,7 @@ def cmd_test(main_file: str) -> None:
         print("Test passed. All texts match exactly.")
     else:
         print(f"Test failed. {len(mismatches)} mismatches found.")
-        for idx_val, orig, trans in mismatches[:5]:
+        for idx_val, orig, trans in mismatches[:10]:
             print(f"Index: {idx_val}\nOriginal: {repr(orig)}\nInjected: {repr(trans)}\n")
 
 
@@ -251,22 +343,27 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='cmd', required=True)
     
-    parser_exp = subparsers.add_parser('export')
-    parser_exp.add_argument('--main', required=True)
-    parser_exp.add_argument('--text', required=True)
+    parser_export = subparsers.add_parser('export')
+    parser_export.add_argument('--main', required=True)
+    parser_export.add_argument('--text', required=True)
+    parser_export.add_argument('--format', choices=['escaped', 'unescaped'], default='escaped')
     
-    parser_imp = subparsers.add_parser('import')
-    parser_imp.add_argument('--main', required=True)
-    parser_imp.add_argument('--text', required=True)
+    parser_import = subparsers.add_parser('import')
+    parser_import.add_argument('--main', required=True)
+    parser_import.add_argument('--text', required=True)
+    parser_import.add_argument('--format', choices=['escaped', 'unescaped'], default='escaped')
     
     parser_test = subparsers.add_parser('test')
     parser_test.add_argument('--main', required=True)
+    parser_test.add_argument('--format', choices=['escaped', 'unescaped'], default='escaped')
     
     args = parser.parse_args()
     
+    escaped: bool = (args.format == 'escaped')
+    
     if args.cmd == 'export': 
-        cmd_export(args.main, args.text)
+        cmd_export(args.main, args.text, escaped)
     elif args.cmd == 'import': 
-        cmd_import(args.main, args.text)
+        cmd_import(args.main, args.text, escaped)
     elif args.cmd == 'test': 
-        cmd_test(args.main)
+        cmd_test(args.main, escaped)
