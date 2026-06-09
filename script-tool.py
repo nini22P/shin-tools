@@ -8,7 +8,9 @@ from typing import Optional
 
 SEP: str = "⭕"
 RUBY_REGEX: str = r'@b([^@.]+)\.@<([^@>]+)@>'
-CODE_REGEX: str = r'(@[abcopsuvwxz][^@\n\r.]*\.|@[-+/<>[\]ekrty{|}]|@[a-zA-Z])'
+ARG_REGEX: str = r'@[abcopsuvwxz][^@\n\r.]*\.'
+NO_ARG_REGEX: str = r'@[+-/<>[\]ekrty{|}]'
+CODE_REGEX: str = f'({ARG_REGEX}|{NO_ARG_REGEX})'
 
 RUBY_PATTERN = re.compile(RUBY_REGEX)
 CODE_PATTERN = re.compile(CODE_REGEX)
