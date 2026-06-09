@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import difflib
+import os
 import pandas as pd
 import re
 import argparse
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 SEP: str = "⭕"
 RUBY_REGEX: str = r'@b([^@.]+)\.@<([^@>]+)@>'
@@ -18,7 +20,7 @@ CODE_PATTERN = re.compile(CODE_REGEX)
 SKIP_SOURCES = {"saveinfo", "select_choice", "voiceplay"}
 
 
-def unescaped_to_escaped(text: str) -> str:
+def _unescaped_to_escaped(text: str) -> str:
     result: list[str] = []
     i = 0
     n = len(text)
@@ -55,7 +57,7 @@ def unescaped_to_escaped(text: str) -> str:
     return "".join(result)
 
 
-def escaped_to_unescaped(text: str) -> str:
+def _escaped_to_unescaped(text: str) -> str:
     result: list[str] = []
     i = 0
     n = len(text)
@@ -97,15 +99,15 @@ def escaped_to_unescaped(text: str) -> str:
     return "".join(result)
 
 
-def to_human(text: str) -> str:
+def _to_human(text: str) -> str:
     return RUBY_PATTERN.sub(r'[\1|\2]', text)
 
 
-def to_game(text: str) -> str:
+def _to_game(text: str) -> str:
     return re.sub(r'\[([^|\]]+)\|([^\]]+)\]', r'@b\1.@<\2@>', text)
 
 
-def has_name(parts: list[str]) -> bool:
+def _has_name(parts: list[str]) -> bool:
     if '@r' not in parts:
         return False
     idx = parts.index('@r')
@@ -115,9 +117,9 @@ def has_name(parts: list[str]) -> bool:
     return bool(prev_content and prev_content.strip())
 
 
-def get_segments(text: str) -> list[str]:
-    parts = CODE_PATTERN.split(to_human(str(text)))
-    start_idx = parts.index('@r') + 1 if has_name(parts) else 0
+def _get_segments(text: str) -> list[str]:
+    parts = CODE_PATTERN.split(_to_human(str(text)))
+    start_idx = parts.index('@r') + 1 if _has_name(parts) else 0
 
     segments: list[str] = []
     for p in parts[start_idx:]:
@@ -126,6 +128,105 @@ def get_segments(text: str) -> list[str]:
         if not CODE_PATTERN.match(p) and p.strip():
             segments.append(p.strip())
     return segments
+
+
+def _parse_suffix(path: str) -> str:
+    base = os.path.splitext(os.path.basename(path))[0]
+    for sep in ('_', '-'):
+        if sep in base:
+            return base.rsplit(sep, 1)[1]
+    raise ValueError(f"File {path} needs a _xx or -xx suffix")
+
+
+def _align_entries(df1: pd.DataFrame, df2: pd.DataFrame, s1: str, s2: str) -> pd.DataFrame:
+    def _key(d: Any) -> str:
+        return str(d['type']) + "\t" + str(d['text'])
+
+    def _row(r: Any, side: str) -> dict[str, str]:
+        return {
+            f'index_{side}': str(r['index']) if r is not None else "",
+            f'offset_{side}': str(r['offset']) if r is not None else "",
+            f'name_{side}': str(r['name']) if r is not None else "",
+        }
+
+    entries1 = [(r.to_dict(), _key(r.to_dict())) for _, r in df1.iterrows()]
+    entries2 = [(r.to_dict(), _key(r.to_dict())) for _, r in df2.iterrows()]
+    keys1 = [k for _, k in entries1]
+    keys2 = [k for _, k in entries2]
+    matcher = difflib.SequenceMatcher(None, keys1, keys2, autojunk=False)
+
+    rows: list[dict[str, str]] = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        chunk1 = entries1[i1:i2]
+        chunk2 = entries2[j1:j2]
+
+        if tag == "equal":
+            for (d1, _), (d2, _) in zip(chunk1, chunk2):
+                rows.append(_row(d1, s1) | _row(d2, s2) | {
+                    'type': d1['type'], 'text': d1['text'],
+                })
+            continue
+
+        if tag == "replace" and chunk1 and chunk2 and 0.5 <= len(chunk1) / len(chunk2) <= 2:
+            paired = min(len(chunk1), len(chunk2))
+            for idx in range(paired):
+                d1, _ = chunk1[idx]
+                d2, _ = chunk2[idx]
+                if str(d1.get('text', '')) == str(d2.get('text', '')):
+                    rows.append(_row(d1, s1) | _row(d2, s2) | {
+                        'type': d1['type'], 'text': d1['text'],
+                    })
+                else:
+                    rows.append(_row(d1, s1) | _row(None, s2) | {
+                        'type': d1['type'], 'text': d1['text'],
+                    })
+                    rows.append(_row(None, s1) | _row(d2, s2) | {
+                        'type': d2['type'], 'text': d2['text'],
+                    })
+            for d1, _ in chunk1[paired:]:
+                rows.append(_row(d1, s1) | _row(None, s2) | {
+                    'type': d1['type'], 'text': d1['text'],
+                })
+            for d2, _ in chunk2[paired:]:
+                rows.append(_row(None, s1) | _row(d2, s2) | {
+                    'type': d2['type'], 'text': d2['text'],
+                })
+        else:
+            for d1, _ in chunk1:
+                rows.append(_row(d1, s1) | _row(None, s2) | {
+                    'type': d1['type'], 'text': d1['text'],
+                })
+            for d2, _ in chunk2:
+                rows.append(_row(None, s1) | _row(d2, s2) | {
+                    'type': d2['type'], 'text': d2['text'],
+                })
+
+    cols = [
+        f'index_{s1}', f'offset_{s1}', f'index_{s2}', f'offset_{s2}',
+        'type', f'name_{s1}', f'name_{s2}', 'text', 'translated',
+    ]
+    for row in rows:
+        row.setdefault('translated', "")
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _report_mismatches(df_out: pd.DataFrame, label: str) -> int:
+    mismatches: list[tuple[str, str, str]] = []
+    for idx, row in df_out.iterrows():
+        orig = str(row.get('s', ''))
+        if not orig or orig == 'nan':
+            continue
+        trans = str(row.get('translated', ''))
+        if orig != trans:
+            mismatches.append((str(row.get('index', idx)), orig, trans))
+    if not mismatches:
+        print(f"  [{label}] All texts match exactly.")
+    else:
+        print(f"  [{label}] {len(mismatches)} mismatches found.")
+        for idx_val, orig, trans in mismatches[:5]:
+            print(f"    Index {idx_val}: {repr(orig)} != {repr(trans)}")
+    return len(mismatches)
 
 
 def extract_texts(df_main: pd.DataFrame, escaped: bool) -> pd.DataFrame:
@@ -140,17 +241,17 @@ def extract_texts(df_main: pd.DataFrame, escaped: bool) -> pd.DataFrame:
         souces = str(row.get('source', ''))
         
         if not escaped and souces not in SKIP_SOURCES:
-            text = unescaped_to_escaped(text)
+            text = _unescaped_to_escaped(text)
 
-        parts = CODE_PATTERN.split(to_human(text))
+        parts = CODE_PATTERN.split(_to_human(text))
         name = ""
 
-        if has_name(parts):
+        if _has_name(parts):
             name = parts[parts.index('@r') - 1].strip()
             if name:
                 names.add(name)
 
-        segs = get_segments(text)
+        segs = _get_segments(text)
         if segs:
             rows.append({
                 'index': str(row.get('index', '')),
@@ -171,7 +272,7 @@ def extract_texts(df_main: pd.DataFrame, escaped: bool) -> pd.DataFrame:
     } for n in sorted(names)]
 
     cols = ['index', 'offset', 'type', 'name', 'text', 'translated']
-    return pd.DataFrame(name_rows + rows)[cols]
+    return pd.DataFrame(name_rows + rows, columns=cols)
 
 
 def inject_row(row: pd.Series, trans_dict: dict[tuple[int, str], Optional[list[str]]], name_dict: dict[str, str], escaped: bool = True) -> str:
@@ -198,21 +299,21 @@ def inject_row(row: pd.Series, trans_dict: dict[tuple[int, str], Optional[list[s
 
     souces = str(row.get('source', ''))
     if not escaped and souces not in SKIP_SOURCES:
-        orig_text = unescaped_to_escaped(orig_text)
+        orig_text = _unescaped_to_escaped(orig_text)
 
-    parts = CODE_PATTERN.split(to_human(orig_text))
+    parts = CODE_PATTERN.split(_to_human(orig_text))
     result: list[str] = []
     seg_idx = 0
     start = 0
 
-    if has_name(parts):
+    if _has_name(parts):
         r_idx = parts.index('@r')
         result.extend(parts[:r_idx - 1])
 
         orig_name = parts[r_idx - 1]
         name_stripped = orig_name.strip()
         translated_name = name_dict.get(name_stripped, name_stripped)
-        result.append(orig_name.replace(name_stripped, to_game(translated_name)))
+        result.append(orig_name.replace(name_stripped, _to_game(translated_name)))
 
         result.append(parts[r_idx])
         start = r_idx + 1
@@ -225,10 +326,10 @@ def inject_row(row: pd.Series, trans_dict: dict[tuple[int, str], Optional[list[s
                 result.append(p)
         elif p.strip():
             if seg_idx < len(segs) and segs[seg_idx].strip():
-                translated_text = to_game(segs[seg_idx].strip())
+                translated_text = _to_game(segs[seg_idx].strip())
                 result.append(p.replace(p.strip(), translated_text))
             else:
-                result.append(to_game(p))
+                result.append(_to_game(p))
             seg_idx += 1
         else:
             result.append(p)
@@ -282,7 +383,7 @@ def inject_texts(df_main: pd.DataFrame, df_text: pd.DataFrame, escaped: bool) ->
         text = inject_row(row, trans_dict, name_dict, escaped)
         souces = str(row.get('source', ''))
         if not escaped and souces not in SKIP_SOURCES:
-            text = escaped_to_unescaped(text)
+            text = _escaped_to_unescaped(text)
         translated.append(text)
     df_out['translated'] = translated
     return df_out
@@ -339,6 +440,87 @@ def cmd_test(main_file: str, escaped: bool) -> None:
             print(f"Index: {idx_val}\nOriginal: {repr(orig)}\nInjected: {repr(trans)}\n")
 
 
+def cmd_duel_export(main_files: list[str], formats: list[str], text_file: str) -> None:
+    s1, s2 = [_parse_suffix(f) for f in main_files]
+    f1 = formats[0] == 'escaped'
+    f2 = formats[1] == 'escaped'
+    df1 = pd.read_csv(main_files[0], encoding='utf-8', low_memory=False)
+    df2 = pd.read_csv(main_files[1], encoding='utf-8', low_memory=False)
+    t1 = extract_texts(df1, f1)
+    t2 = extract_texts(df2, f2)
+    merged = _align_entries(t1, t2, s1, s2)
+    merged.to_csv(text_file, index=False, encoding='utf-8')
+    both = ((merged[f'index_{s1}'] != "") & (merged[f'index_{s2}'] != "")).sum()
+    only1 = ((merged[f'index_{s1}'] != "") & (merged[f'index_{s2}'] == "")).sum()
+    only2 = ((merged[f'index_{s2}'] != "") & (merged[f'index_{s1}'] == "")).sum()
+    print(f"Exported {text_file}  ({both} both, {only1} only {s1}, {only2} only {s2})")
+
+
+def cmd_duel_import(main_files: list[str], formats: list[str], text_file: str) -> None:
+    sides: list[tuple[str, bool, str]] = []
+    for f, fmt in zip(main_files, formats):
+        if not f:
+            continue
+        sides.append((f, fmt == 'escaped', _parse_suffix(f)))
+    if not sides:
+        print("No valid files to import")
+        sys.exit(1)
+    df_merged = pd.read_csv(text_file, encoding='utf-8', dtype=str).fillna("")
+    cols = ['index', 'offset', 'type', 'name', 'text', 'translated']
+
+    for main_file, fmt_esc, suffix in sides:
+        idx_col = f'index_{suffix}'
+        mask = (df_merged[idx_col] != "") | (df_merged['type'] == 'name')
+        df_side = df_merged.loc[mask, :].copy()
+        if df_side.empty:
+            continue
+        df_side = df_side.rename(columns={
+            idx_col: 'index', f'offset_{suffix}': 'offset', f'name_{suffix}': 'name'
+        }).loc[:, cols]
+        df_main = pd.read_csv(main_file, encoding='utf-8', low_memory=False)
+        df_out = inject_texts(df_main, df_side, fmt_esc)
+        df_out.to_csv(main_file, index=False, encoding='utf-8')
+        print(f"Updated {main_file}")
+
+
+def cmd_duel_test(main_files: list[str], formats: list[str]) -> None:
+    s1, s2 = [_parse_suffix(f) for f in main_files]
+    f1 = formats[0] == 'escaped'
+    f2 = formats[1] == 'escaped'
+    print(f"=== Dual test: {os.path.basename(main_files[0])} ({formats[0]}) + {os.path.basename(main_files[1])} ({formats[1]}) ===\n")
+
+    df1 = pd.read_csv(main_files[0], encoding='utf-8', low_memory=False)
+    df2 = pd.read_csv(main_files[1], encoding='utf-8', low_memory=False)
+
+    t1 = extract_texts(df1, f1)
+    t2 = extract_texts(df2, f2)
+    merged = _align_entries(t1, t2, s1, s2)
+    merged['translated'] = merged['text']
+
+    both = ((merged[f'index_{s1}'] != "") & (merged[f'index_{s2}'] != "")).sum()
+    only1 = ((merged[f'index_{s1}'] != "") & (merged[f'index_{s2}'] == "")).sum()
+    only2 = ((merged[f'index_{s2}'] != "") & (merged[f'index_{s1}'] == "")).sum()
+    print(f"Alignment: {both} both, {only1} only {s1}, {only2} only {s2}\n")
+
+    cols = ['index', 'offset', 'type', 'name', 'text', 'translated']
+    total_mismatches = 0
+    for main_file, fmt_esc, suffix in [(main_files[0], f1, s1), (main_files[1], f2, s2)]:
+        idx_col = f'index_{suffix}'
+        mask = (merged[idx_col] != "") | (merged['type'] == 'name')
+        df_side = merged.loc[mask, :].copy()
+        if df_side.empty:
+            continue
+        df_side = df_side.rename(columns={
+            idx_col: 'index', f'offset_{suffix}': 'offset', f'name_{suffix}': 'name'
+        }).loc[:, cols]
+        df_main = pd.read_csv(main_file, encoding='utf-8', low_memory=False)
+        df_out = inject_texts(df_main, df_side, fmt_esc)
+        total_mismatches += _report_mismatches(df_out, suffix)
+
+    if total_mismatches == 0:
+        print("\nAll round-trip tests passed.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='cmd', required=True)
@@ -346,24 +528,50 @@ if __name__ == "__main__":
     parser_export = subparsers.add_parser('export')
     parser_export.add_argument('--main', required=True)
     parser_export.add_argument('--text', required=True)
-    parser_export.add_argument('--format', choices=['escaped', 'unescaped'], default='escaped')
+    parser_export.add_argument('--format', default='escaped')
     
     parser_import = subparsers.add_parser('import')
     parser_import.add_argument('--main', required=True)
     parser_import.add_argument('--text', required=True)
-    parser_import.add_argument('--format', choices=['escaped', 'unescaped'], default='escaped')
+    parser_import.add_argument('--format', default='escaped')
     
     parser_test = subparsers.add_parser('test')
     parser_test.add_argument('--main', required=True)
-    parser_test.add_argument('--format', choices=['escaped', 'unescaped'], default='escaped')
+    parser_test.add_argument('--format', default='escaped')
     
     args = parser.parse_args()
     
-    escaped: bool = (args.format == 'escaped')
+    mains = args.main.split(',')
+    fmts = args.format.split(',')
+    valid_fmts = {'escaped', 'unescaped'}
+    for f in fmts:
+        if f not in valid_fmts:
+            print(f"Invalid format '{f}', must be escaped or unescaped")
+            sys.exit(1)
     
-    if args.cmd == 'export': 
-        cmd_export(args.main, args.text, escaped)
-    elif args.cmd == 'import': 
-        cmd_import(args.main, args.text, escaped)
-    elif args.cmd == 'test': 
-        cmd_test(args.main, escaped)
+    if len(mains) == 1:
+        if len(fmts) != 1:
+            print("Single file requires single format")
+            sys.exit(1)
+        escaped = (fmts[0] == 'escaped')
+        if args.cmd == 'export': 
+            cmd_export(mains[0], args.text, escaped)
+        elif args.cmd == 'import': 
+            cmd_import(mains[0], args.text, escaped)
+        elif args.cmd == 'test': 
+            cmd_test(mains[0], escaped)
+    elif len(mains) == 2:
+        if len(fmts) == 1:
+            fmts = [fmts[0], fmts[0]]
+        if len(fmts) != 2:
+            print("Dual files require 1 or 2 format values")
+            sys.exit(1)
+        if args.cmd == 'export': 
+            cmd_duel_export(mains, fmts, args.text)
+        elif args.cmd == 'import': 
+            cmd_duel_import(mains, fmts, args.text)
+        elif args.cmd == 'test': 
+            cmd_duel_test(mains, fmts)
+    else:
+        print("--main supports 1 or 2 files (comma-separated)")
+        sys.exit(1)
