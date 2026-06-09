@@ -130,13 +130,6 @@ def _get_segments(text: str) -> list[str]:
     return segments
 
 
-def _parse_suffix(path: str) -> str:
-    base = os.path.splitext(os.path.basename(path))[0]
-    for sep in ('_', '-'):
-        if sep in base:
-            return base.rsplit(sep, 1)[1]
-    raise ValueError(f"File {path} needs a _xx or -xx suffix")
-
 
 def _align_entries(df1: pd.DataFrame, df2: pd.DataFrame, s1: str, s2: str) -> pd.DataFrame:
     def _key(d: Any) -> str:
@@ -440,8 +433,8 @@ def cmd_test(main_file: str, escaped: bool) -> None:
             print(f"Index: {idx_val}\nOriginal: {repr(orig)}\nInjected: {repr(trans)}\n")
 
 
-def cmd_duel_export(main_files: list[str], formats: list[str], text_file: str) -> None:
-    s1, s2 = [_parse_suffix(f) for f in main_files]
+def cmd_duel_export(main_files: list[str], formats: list[str], text_file: str, suffixes: list[str]) -> None:
+    s1, s2 = suffixes
     f1 = formats[0] == 'escaped'
     f2 = formats[1] == 'escaped'
     df1 = pd.read_csv(main_files[0], encoding='utf-8', low_memory=False)
@@ -456,12 +449,12 @@ def cmd_duel_export(main_files: list[str], formats: list[str], text_file: str) -
     print(f"Exported {text_file}  ({both} both, {only1} only {s1}, {only2} only {s2})")
 
 
-def cmd_duel_import(main_files: list[str], formats: list[str], text_file: str) -> None:
+def cmd_duel_import(main_files: list[str], formats: list[str], text_file: str, suffixes: list[str]) -> None:
     sides: list[tuple[str, bool, str]] = []
-    for f, fmt in zip(main_files, formats):
+    for i, (f, fmt) in enumerate(zip(main_files, formats)):
         if not f:
             continue
-        sides.append((f, fmt == 'escaped', _parse_suffix(f)))
+        sides.append((f, fmt == 'escaped', suffixes[i]))
     if not sides:
         print("No valid files to import")
         sys.exit(1)
@@ -483,8 +476,8 @@ def cmd_duel_import(main_files: list[str], formats: list[str], text_file: str) -
         print(f"Updated {main_file}")
 
 
-def cmd_duel_test(main_files: list[str], formats: list[str]) -> None:
-    s1, s2 = [_parse_suffix(f) for f in main_files]
+def cmd_duel_test(main_files: list[str], formats: list[str], suffixes: list[str]) -> None:
+    s1, s2 = suffixes
     f1 = formats[0] == 'escaped'
     f2 = formats[1] == 'escaped'
     print(f"=== Dual test: {os.path.basename(main_files[0])} ({formats[0]}) + {os.path.basename(main_files[1])} ({formats[1]}) ===\n")
@@ -529,15 +522,18 @@ if __name__ == "__main__":
     parser_export.add_argument('--main', required=True)
     parser_export.add_argument('--text', required=True)
     parser_export.add_argument('--format', default='escaped')
+    parser_export.add_argument('--suffix', default='')
     
     parser_import = subparsers.add_parser('import')
     parser_import.add_argument('--main', required=True)
     parser_import.add_argument('--text', required=True)
     parser_import.add_argument('--format', default='escaped')
+    parser_import.add_argument('--suffix', default='')
     
     parser_test = subparsers.add_parser('test')
     parser_test.add_argument('--main', required=True)
     parser_test.add_argument('--format', default='escaped')
+    parser_test.add_argument('--suffix', default='')
     
     args = parser.parse_args()
     
@@ -566,12 +562,18 @@ if __name__ == "__main__":
         if len(fmts) != 2:
             print("Dual files require 1 or 2 format values")
             sys.exit(1)
+        suffixes: list[str] = args.suffix.split(',') if args.suffix else []
+        if len(suffixes) == 1:
+            suffixes = [suffixes[0], suffixes[0]]
+        if len(suffixes) != 2:
+            print("Dual files require --suffix with 2 comma-separated values (e.g. --suffix hou,sui)")
+            sys.exit(1)
         if args.cmd == 'export': 
-            cmd_duel_export(mains, fmts, args.text)
+            cmd_duel_export(mains, fmts, args.text, suffixes)
         elif args.cmd == 'import': 
-            cmd_duel_import(mains, fmts, args.text)
+            cmd_duel_import(mains, fmts, args.text, suffixes)
         elif args.cmd == 'test': 
-            cmd_duel_test(mains, fmts)
+            cmd_duel_test(mains, fmts, suffixes)
     else:
         print("--main supports 1 or 2 files (comma-separated)")
         sys.exit(1)
