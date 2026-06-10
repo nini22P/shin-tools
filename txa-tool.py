@@ -184,6 +184,8 @@ def convert_file(file_path: str, output_dir: str) -> bool:
         print(f"[skip] unsupported TXA version: {version}")
         return False
 
+    print(f"[v{version}] {os.path.abspath(file_path)} -> {os.path.abspath(output_dir)}")
+
     index_entries: list[tuple[int, int, str]] = []
 
     offset = 32
@@ -213,7 +215,10 @@ def convert_file(file_path: str, output_dir: str) -> bool:
         raw_data = data[data_off:data_off + raw_size]
 
         if version == 0:
-            dec_data = lz77_v0.decompress_v0(raw_data)
+            if comp_size > 0:
+                dec_data = lz77_v0.decompress_v0(raw_data)
+            else:
+                dec_data = raw_data
         elif comp_size > 0:
             dec_data = lz77.decompress(raw_data, seek_bits=12, backseek_nbyte=2)
         else:
@@ -238,7 +243,6 @@ def convert_file(file_path: str, output_dir: str) -> bool:
         for pos, vidx, name in index_entries:
             f.write(f"{pos:03d} -> {vidx:03d} \"{name}\"\n")
 
-    print(f"[v{version}] {os.path.abspath(file_path)} -> {os.path.abspath(output_dir)}")
     return True
 
 
