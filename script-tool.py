@@ -76,17 +76,11 @@ def _escaped_to_unescaped(text: str) -> str:
                     arg = text[i + 2:j]
                     result.append(f"{cmd}{arg}.")
                     i = j + 1
-                    if i < n and text[i] == ' ':
-                        result.append(' ')
-                        i += 1
                     continue
 
             if cmd in "+-/<>[]ekrtyi{|}":
                 result.append(cmd)
                 i += 2
-                if i < n and text[i] == ' ':
-                    result.append(' ')
-                    i += 1
                 continue
 
         if c == '!' or (c.isascii() and c.isprintable()):
@@ -403,7 +397,7 @@ def cmd_import(main_file: str, text_file: str, escaped: bool) -> None:
 
 
 def cmd_test(main_file: str, escaped: bool) -> None:
-    print("Running in-memory loop test...")
+    print("Running round-trip test...")
     df_main = pd.read_csv(main_file, encoding='utf-8', low_memory=False)
 
     df_text = extract_texts(df_main, escaped)
