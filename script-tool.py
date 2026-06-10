@@ -17,7 +17,7 @@ CODE_REGEX: str = f'({ARG_REGEX}|{NO_ARG_REGEX})'
 RUBY_PATTERN = re.compile(RUBY_REGEX)
 CODE_PATTERN = re.compile(CODE_REGEX)
 
-SKIP_SOURCES = {"saveinfo", "select_choice", "voiceplay"}
+SKIP_SOURCES = {"saveinfo", "voiceplay"}
 
 
 def _unescaped_to_escaped(text: str) -> str:
