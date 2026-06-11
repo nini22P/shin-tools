@@ -13,20 +13,20 @@ from numba.typed import Dict
 from numba.core import types
 
 
-def decompress_v0(input_data: bytes) -> bytes:
+def decompress(input_data: bytes) -> bytes:
     input_arr = np.frombuffer(input_data, dtype=np.uint8)
-    result = _decompress_v0(input_arr)
+    result = _decompress(input_arr)
     return bytes(result)
 
 
-def compress_v0(input_bytes: bytes) -> bytes:
+def compress(input_bytes: bytes) -> bytes:
     input_arr = np.frombuffer(input_bytes, dtype=np.uint8)
-    result = _compress_v0(input_arr)
+    result = _compress(input_arr)
     return bytes(result)
 
 
 @njit
-def _decompress_v0(input_arr):
+def _decompress(input_arr):
     n = len(input_arr)
     out = np.zeros(max(n, 256), dtype=np.uint8)
     out_pos = 0
@@ -72,7 +72,7 @@ def _decompress_v0(input_arr):
 
 
 @njit
-def _compress_v0(input_arr):
+def _compress(input_arr):
     n = len(input_arr)
     if n == 0:
         return np.zeros(0, dtype=np.uint8)
