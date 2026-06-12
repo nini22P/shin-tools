@@ -191,10 +191,10 @@ def _align_entries(df1: pd.DataFrame, df2: pd.DataFrame, s1: str, s2: str) -> pd
 
     cols = [
         f'index_{s1}', f'offset_{s1}', f'index_{s2}', f'offset_{s2}',
-        'type', f'name_{s1}', f'name_{s2}', 'text', 'translated',
+        'type', f'name_{s1}', f'name_{s2}', 'text', 'translation',
     ]
     for row in rows:
-        row.setdefault('translated', "")
+        row.setdefault('translation', "")
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -246,7 +246,7 @@ def extract_texts(df_main: pd.DataFrame, escaped: bool) -> pd.DataFrame:
                 'type': str(row.get('source', '')),
                 'name': name,
                 'text': SEP.join(segs),
-                'translated': ""
+                'translation': ""
             })
 
     name_rows: list[dict[str, str]] = [{
@@ -255,10 +255,10 @@ def extract_texts(df_main: pd.DataFrame, escaped: bool) -> pd.DataFrame:
         'type': "name",
         'name': "",
         'text': n,
-        'translated': ""
+        'translation': ""
     } for n in sorted(names)]
 
-    cols = ['index', 'offset', 'type', 'name', 'text', 'translated']
+    cols = ['index', 'offset', 'type', 'name', 'text', 'translation']
     return pd.DataFrame(name_rows + rows, columns=cols)
 
 
@@ -332,7 +332,7 @@ def inject_texts(df_main: pd.DataFrame, df_text: pd.DataFrame, escaped: bool) ->
     for row_num, (_index, row) in enumerate(df_text.iterrows(), start=2):
         row_type = str(row.get('type', ''))
         txt = str(row.get('text', ''))
-        trans = str(row.get('translated', ''))
+        trans = str(row.get('translation', ''))
         idx_val = str(row.get('index', '')).strip()
         offset_val = str(row.get('offset', '')).strip()
 
@@ -401,7 +401,7 @@ def cmd_test(main_file: str, escaped: bool) -> None:
     df_main = pd.read_csv(main_file, encoding='utf-8', low_memory=False)
 
     df_text = extract_texts(df_main, escaped)
-    df_text['translated'] = df_text['text']
+    df_text['translation'] = df_text['text']
 
     try:
         df_out = inject_texts(df_main, df_text, escaped)
@@ -453,7 +453,7 @@ def cmd_duel_import(main_files: list[str], formats: list[str], text_file: str, s
         print("No valid files to import")
         sys.exit(1)
     df_merged = pd.read_csv(text_file, encoding='utf-8', dtype=str).fillna("")
-    cols = ['index', 'offset', 'type', 'name', 'text', 'translated']
+    cols = ['index', 'offset', 'type', 'name', 'text', 'translation']
 
     for main_file, fmt_esc, suffix in sides:
         idx_col = f'index_{suffix}'
@@ -482,14 +482,14 @@ def cmd_duel_test(main_files: list[str], formats: list[str], suffixes: list[str]
     t1 = extract_texts(df1, f1)
     t2 = extract_texts(df2, f2)
     merged = _align_entries(t1, t2, s1, s2)
-    merged['translated'] = merged['text']
+    merged['translation'] = merged['text']
 
     both = ((merged[f'index_{s1}'] != "") & (merged[f'index_{s2}'] != "")).sum()
     only1 = ((merged[f'index_{s1}'] != "") & (merged[f'index_{s2}'] == "")).sum()
     only2 = ((merged[f'index_{s2}'] != "") & (merged[f'index_{s1}'] == "")).sum()
     print(f"Alignment: {both} both, {only1} only {s1}, {only2} only {s2}\n")
 
-    cols = ['index', 'offset', 'type', 'name', 'text', 'translated']
+    cols = ['index', 'offset', 'type', 'name', 'text', 'translation']
     total_mismatches = 0
     for main_file, fmt_esc, suffix in [(main_files[0], f1, s1), (main_files[1], f2, s2)]:
         idx_col = f'index_{suffix}'
