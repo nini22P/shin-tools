@@ -2,6 +2,10 @@
 
 Some scripts for shin engine.
 
+## Usage
+
+- [higurashi-chs](https://github.com/nini22P/higurashi-chs)
+- [white-eternity-chs](https://github.com/nini22P/white-eternity-chs)
 ## Credits
 
 - [lzhhzl / about-shin](https://github.com/lzhhzl/about-shin)
