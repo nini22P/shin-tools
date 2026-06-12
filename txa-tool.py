@@ -448,7 +448,12 @@ def pack(args: argparse.Namespace) -> None:
         print("[error] input must be a directory (containing index.txt and PNG files)")
         return
 
-    if _dir_has_index(abs_input):
+    is_single = args.output.lower().endswith('.txa')
+
+    if is_single:
+        if not _dir_has_index(abs_input):
+            print(f"[error] index.txt not found in {abs_input}")
+            return
         pack_txa(abs_input, args.output, version=args.version)
         return
 
