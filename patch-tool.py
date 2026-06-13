@@ -42,7 +42,7 @@ def patch_binary(binary_path: str, output_path: str | None, csv_path: str, encod
                 offset = int(offset_str, 16)
                 max_length = int(length_str)
             except ValueError:
-                print(f"Warning: Format error at line {i+2}, skipping")
+                print(f"Warning: Format error at {offset_str}, skipping")
                 continue
 
             original_text = row.get('text', '').strip()
@@ -54,36 +54,36 @@ def patch_binary(binary_path: str, output_path: str | None, csv_path: str, encod
                 f_bin.seek(offset)
                 raw_original = f_bin.read(max_length)
             except Exception as e:
-                print(f"Error: Failed to read original data at line {i+2}: {e}")
+                print(f"Error: Failed to read original data at {offset_str}: {e}")
                 continue
 
             try:
                 decoded_original = raw_original.decode(encoding)
             except Exception as e:
-                print(f"Error: Failed to decode original text at line {i+2}: {e}")
+                print(f"Error: Failed to decode original text at {offset_str}: {e}")
                 continue
 
             if decoded_original.replace('\r\n', '\n') != original_text.replace('\r\n', '\n'):
-                print(f"Error: Original text mismatch at line {i+2}")
+                print(f"Error: Original text mismatch")
                 print(f"  Expected (CSV):  '{original_text}'")
                 print(f"  Actual (binary): '{decoded_original}'")
-                print(f"  Offset: 0x{offset:X}, Length: {max_length}")
+                print(f"  Offset: {offset_str}, Length: {max_length}")
                 continue
 
             try:
                 encoded_text = translation.encode(encoding)
             except Exception as e:
-                print(f"Encoding error at line {i+2}: {e}")
+                print(f"Encoding error at {offset_str}: {e}")
                 continue
 
             current_len = len(encoded_text)
 
             if current_len > max_length:
-                print(f"Error: Translation too long at line {i+2}")
+                print(f"Error: Translation too long")
                 print(f"  Original: {row.get('text', '')}")
                 print(f"  Translation: {translation}")
-                print(f"  Length: {current_len}, Max: {max_length}")
-                sys.exit(1)
+                print(f"  Offset: {offset_str}, Length: {current_len}, Max: {max_length}")
+                continue
 
             data_to_write = encoded_text + b'\x00' * (max_length - current_len)
 
