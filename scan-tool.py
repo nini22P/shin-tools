@@ -52,7 +52,7 @@ def in_encoding_range(text: str, encoding: str):
         return True
 
 
-def scan(data: bytes, decode_enc: str, filter_enc: str):
+def scan(data: bytes, decode_enc: str, filter_enc: str, base_offset: int = 0):
     results = []
 
     if decode_enc.lower().startswith("utf-16"):
@@ -72,7 +72,7 @@ def scan(data: bytes, decode_enc: str, filter_enc: str):
         if not in_encoding_range(text, filter_enc):
             continue
 
-        results.append((offset, len(chunk), text))
+        results.append((base_offset + offset, len(chunk), text))
 
     return results
 
@@ -93,13 +93,19 @@ def main():
     parser.add_argument("-o", "--output", required=True, help="output csv file")
     parser.add_argument("-e", "--encoding", default="utf-8", help="decode encoding (utf-8, shift_jis, gbk...)")
     parser.add_argument("-f", "--filter", default="utf-8", help="filter character set")
+    parser.add_argument("--start", type=lambda x: int(x, 0), default=0,
+                        help="start offset (decimal or 0xhex)")
+    parser.add_argument("--end", type=lambda x: int(x, 0), default=None,
+                        help="end offset (decimal or 0xhex)")
 
     args = parser.parse_args()
 
     with open(args.input, "rb") as f:
         data = f.read()
 
-    results = scan(data, args.encoding, args.filter)
+    data = data[args.start:args.end]
+
+    results = scan(data, args.encoding, args.filter, base_offset=args.start)
 
     export_csv(results, args.output, args.encoding)
 
