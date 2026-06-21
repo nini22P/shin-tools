@@ -72,6 +72,8 @@ def decode_dict_block(data: bytes, w: int, h: int, flags: int, do_swap: bool = T
             pixels[po + 1] = palette_bytes[pi * 4 + 1]
             pixels[po + 2] = palette_bytes[pi * 4]
             pixels[po + 3] = alpha_bytes[row * stride + col] if alpha_bytes is not None else palette_bytes[pi * 4 + 3]
+            if pixels[po + 3] == 0:
+                pixels[po] = pixels[po + 1] = pixels[po + 2] = 0
     else:
         for i in range(w * h):
             row = i // w
@@ -82,11 +84,13 @@ def decode_dict_block(data: bytes, w: int, h: int, flags: int, do_swap: bool = T
             pixels[po + 1] = palette_bytes[pi * 4 + 1]
             pixels[po + 2] = palette_bytes[pi * 4 + 2]
             pixels[po + 3] = alpha_bytes[row * stride + col] if alpha_bytes is not None else palette_bytes[pi * 4 + 3]
+            if pixels[po + 3] == 0:
+                pixels[po] = pixels[po + 1] = pixels[po + 2] = 0
 
     return pixels
 
 
-def decode_differential_block(data: bytes, w: int, h: int) -> bytearray:
+def decode_diff_block(data: bytes, w: int, h: int) -> bytearray:
     stride = (w * 4 + 0xf) & ~0xf
     pixels = bytearray(w * h * 4)
     if h > 0:
@@ -99,21 +103,32 @@ def decode_differential_block(data: bytes, w: int, h: int) -> bytearray:
             for i in range(row_size):
                 pixels[cur_start + i] = (pixels[prev_start + i] + data[off + i]) & 0xFF
             off += stride
+    for i in range(w * h):
+        if pixels[i * 4 + 3] == 0:
+            pixels[i * 4] = 0
+            pixels[i * 4 + 1] = 0
+            pixels[i * 4 + 2] = 0
     return pixels
 
 
-def encode_differential_block(pixels: bytes, w: int, h: int) -> bytes:
+def encode_diff_block(pixels: bytes, w: int, h: int) -> bytes:
+    buf = bytearray(pixels)
+    for i in range(w * h):
+        if buf[i * 4 + 3] == 0:
+            buf[i * 4] = 0
+            buf[i * 4 + 1] = 0
+            buf[i * 4 + 2] = 0
     stride = (w * 4 + 0xf) & ~0xf
     result = bytearray(stride * h)
     if h > 0:
         row_size = w * 4
-        result[:row_size] = pixels[:row_size]
+        result[:row_size] = buf[:row_size]
         off = stride
         for j in range(1, h):
             prev_start = (j - 1) * row_size
             cur_start = j * row_size
             for i in range(row_size):
-                result[off + i] = (pixels[cur_start + i] - pixels[prev_start + i]) & 0xFF
+                result[off + i] = (buf[cur_start + i] - buf[prev_start + i]) & 0xFF
             off += stride
     return bytes(result)
 
@@ -128,6 +143,8 @@ def encode_dict_block(pixels: bytes, w: int, h: int, flags: int, do_swap: bool =
     for i in range(w * h):
         pos = i * 4
         color = (pixels[pos], pixels[pos + 1], pixels[pos + 2], pixels[pos + 3])
+        if color[3] == 0:
+            color = (0, 0, 0, 0)
         if color not in palette_map:
             palette_map[color] = len(palette_order)
             palette_order.append(color)
@@ -156,6 +173,8 @@ def encode_dict_block(pixels: bytes, w: int, h: int, flags: int, do_swap: bool =
         col = i % w
         pos = i * 4
         color = (pixels[pos], pixels[pos + 1], pixels[pos + 2], pixels[pos + 3])
+        if color[3] == 0:
+            color = (0, 0, 0, 0)
         index_bytes[row * stride + col] = palette_map[color]
 
     result = bytes(palette_bytes) + bytes(index_bytes)
@@ -353,7 +372,7 @@ def _pack(png_path: str, output_path: str, fmt: _PicFmt) -> bool:
                     encoded_bytes = encode_dict_block(pixels, tw, th, 2, do_swap=False)
                     tile_flags = 2
                 except ValueError:
-                    encoded_bytes = encode_differential_block(pixels, tw, th)
+                    encoded_bytes = encode_diff_block(pixels, tw, th)
                     tile_flags = 1
         else:
             encoded_bytes = encode_dict_block(pixels, tw, th, tile_flags, do_swap=fmt.do_swap)
@@ -604,7 +623,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                 if tile_flags & 2:
                     pixel_bytes = decode_dict_block(decoded_bytes, tw, th, tile_flags, do_swap=False)
                 else:
-                    pixel_bytes = decode_differential_block(decoded_bytes, tw, th)
+                    pixel_bytes = decode_diff_block(decoded_bytes, tw, th)
 
             if pixel_bytes:
                 try:

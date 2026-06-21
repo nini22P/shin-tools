@@ -4,10 +4,12 @@ import struct
 import os
 import argparse
 import re
+from io import BytesIO
 from PIL import Image
 
 import lz77
 import lz77_v0
+import pngquant_py
 
 _INDEX_RE = re.compile(r'(\d+)\s*->\s*(\d+)\s+"(.+)"')
 
@@ -78,6 +80,12 @@ def decode_dict(data: bytes, w: int, h: int, do_swap: bool = True) -> bytearray:
         for i in range(min(len(mask), w * h)):
             pixels[i * 4 + 3] = mask[i]
 
+    for i in range(w * h):
+        if pixels[i * 4 + 3] == 0:
+            pixels[i * 4] = 0
+            pixels[i * 4 + 1] = 0
+            pixels[i * 4 + 2] = 0
+
     return pixels
 
 
@@ -98,6 +106,13 @@ def decode_diff(data: bytes, w: int, h: int, do_swap: bool = True) -> bytearray:
 
     if do_swap:
         _bgra_to_rgba(pixels)
+
+    for i in range(w * h):
+        if pixels[i * 4 + 3] == 0:
+            pixels[i * 4] = 0
+            pixels[i * 4 + 1] = 0
+            pixels[i * 4 + 2] = 0
+
     return pixels
 
 
@@ -134,6 +149,8 @@ def encode_dict(img: Image.Image, do_swap: bool = True) -> bytes:
         for x in range(w):
             pos = (y * w + x) * 4
             color = (pixels[pos], pixels[pos+1], pixels[pos+2], pixels[pos+3])
+            if color[3] == 0:
+                color = (0, 0, 0, 0)
             if color not in palette_map:
                 palette_map[color] = len(palette_order)
                 palette_order.append(color)
@@ -158,6 +175,8 @@ def encode_dict(img: Image.Image, do_swap: bool = True) -> bytes:
         for x in range(w):
             pos = (y * w + x) * 4
             color = (pixels[pos], pixels[pos+1], pixels[pos+2], pixels[pos+3])
+            if color[3] == 0:
+                color = (0, 0, 0, 0)
             index_bytes[y * stride + x] = palette_map[color]
 
     return bytes(palette_bytes + index_bytes)
@@ -168,6 +187,11 @@ def encode_diff(img: Image.Image, do_swap: bool = True) -> bytes:
     stride = (4 * w + 15) & ~15
 
     pixels = bytearray(img.tobytes())
+    for i in range(w * h):
+        if pixels[i * 4 + 3] == 0:
+            pixels[i * 4] = 0
+            pixels[i * 4 + 1] = 0
+            pixels[i * 4 + 2] = 0
     if do_swap:
         _rgba_to_bgra(pixels)
 
@@ -298,8 +322,21 @@ def pack_txa(source_dir: str, output_path: str, version: int = 2) -> bool:
 
     entries.sort(key=lambda x: x[0])
 
-    use_dict = all(eligible_for_dict(e[3]) for e in entries)
-    mode_str = "palette" if use_dict else "diff"
+    if version in (0, 1):
+        for i, e in enumerate(entries):
+            pos, vidx, name, img = e
+            if not eligible_for_dict(img):
+                buf = BytesIO()
+                img.save(buf, format='PNG')
+                q = pngquant_py.quantize(buf.getvalue(), speed=1)
+                img = Image.open(BytesIO(q)).convert("RGBA")
+                entries[i] = (pos, vidx, name, img)
+        use_dict = True
+        mode_str = "palette (quantized)"
+    else:
+        use_dict = all(eligible_for_dict(e[3]) for e in entries)
+        mode_str = "palette" if use_dict else "diff"
+
     print(f"[v{version}] {os.path.abspath(source_dir)} -> {os.path.abspath(output_path)}  [{mode_str}, {len(entries)} textures]")
 
     entry_hdr_size = 16 if version in (0, 1) else 20
