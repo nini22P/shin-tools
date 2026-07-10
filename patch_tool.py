@@ -71,7 +71,7 @@ def patch_binary(binary_path: str, output_path: str | None, csv_path: str, encod
                 continue
 
             try:
-                encoded_text = translation.encode(encoding)
+                encoded_text = translation.replace('\r\n', '\n').encode(encoding)
             except Exception as e:
                 print(f"Encoding error at {offset_str}: {e}")
                 continue
