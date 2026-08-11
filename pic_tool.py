@@ -329,7 +329,7 @@ _FMTS: dict[int, _PicFmt] = {
         decompress=partial(lz77.decompress, seek_bits=12, backseek_nbyte=2),
         hdr_fmt='<IIhhHHIII',
         entry_fmt='<HHII', entry_has_size=True, entry_size_first=False,
-        frag_fmt='<HHHHHHHHHH',
+        frag_fmt='<HHHHHHHHI',
         has_crc=True,
     ),
     3: _PicFmt(
@@ -338,7 +338,7 @@ _FMTS: dict[int, _PicFmt] = {
         decompress=partial(lz77.decompress, seek_bits=12, backseek_nbyte=2),
         hdr_fmt='<IIhhHHIII',
         entry_fmt='<IHHI', entry_has_size=True, entry_size_first=True,
-        frag_fmt='<HHHHHHHHHH',
+        frag_fmt='<HHHHHHHHI',
         has_crc=True,
     ),
 }
@@ -378,7 +378,7 @@ def _pack(png_path: str, output_path: str, fmt: _PicFmt) -> bool:
             encoded_bytes = encode_dict_block(pixels, tw, th, tile_flags, do_swap=fmt.do_swap)
 
         compressed = fmt.compress(encoded_bytes)
-        comp_size = len(compressed) if len(compressed) < len(encoded_bytes) and len(compressed) <= 0xFFFF else 0
+        comp_size = len(compressed) if len(compressed) < len(encoded_bytes) else 0
 
         vert_count = info['op_verts'] + info['tr_verts']
         data_off_no_align = 20 + vert_count * 8
@@ -386,14 +386,9 @@ def _pack(png_path: str, output_path: str, fmt: _PicFmt) -> bool:
         alignment = data_align // 2
 
         frag = bytearray()
-        if fmt.version in (0, 1):
-            frag.extend(struct.pack(fmt.frag_fmt,
-                tile_flags, info['op_verts'], info['tr_verts'], alignment,
-                info['off_x'], info['off_y'], tw, th, comp_size))
-        else:
-            frag.extend(struct.pack(fmt.frag_fmt,
-                tile_flags, info['op_verts'], info['tr_verts'], alignment,
-                info['off_x'], info['off_y'], tw, th, comp_size, 0))
+        frag.extend(struct.pack(fmt.frag_fmt,
+            tile_flags, info['op_verts'], info['tr_verts'], alignment,
+            info['off_x'], info['off_y'], tw, th, comp_size))
         mask_rect = struct.pack("<HHHH", 0, 0, tw - 2, th - 2)
         frag.extend(mask_rect * vert_count)
         frag.extend(b'\x00' * data_align)
@@ -520,7 +515,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                 comp_size = hdr[8]
 
                 if tw > img_w + 2 or th > img_h + 2:
-                    print(f"[warn] Fragment {i} ({x},{y}) at offset {offset}: suspicious header (w={tw} h={th} op={op_verts} tr={tr_verts} flags={tile_flags:#06x} comp={comp_size}), file may be corrupted")
+                    print(f"[warn] {os.path.abspath(file_path)}: Fragment {i} ({x},{y}) at offset {offset}: suspicious header (w={tw} h={th} op={op_verts} tr={tr_verts} flags={tile_flags:#06x} comp={comp_size}), file may be corrupted")
                     continue
 
                 vert_count = op_verts + tr_verts
@@ -542,13 +537,17 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                 try:
                     decoded_bytes = fmt.decompress(raw_data) if comp_size > 0 else raw_data
                 except Exception as e:
-                    print(f"[warn] Fragment {i} ({x},{y}): decompress failed: {e}")
+                    print(f"[warn] {os.path.abspath(file_path)}: Fragment {i} ({x},{y}): decompress failed: {e}")
                     continue
 
                 if not decoded_bytes:
                     continue
 
-                pixel_bytes = decode_dict_block(decoded_bytes, tw, th, tile_flags)
+                try:
+                    pixel_bytes = decode_dict_block(decoded_bytes, tw, th, tile_flags)
+                except Exception as e:
+                    print(f"[warn] {os.path.abspath(file_path)}: Fragment {i} ({x},{y}) w={tw} h={th} flags={tile_flags:#06x} comp={comp_size}: dict decode failed: {e}")
+                    continue
 
             else:
                 # v2/v3: pre-read full fragment
@@ -558,7 +557,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                     f.seek(offset)
                     fragment_data = f.read(frag_size)
                     if len(fragment_data) < 20:
-                        print(f"[warn] Fragment ({x},{y}) at offset {offset}: too small ({len(fragment_data)} bytes), skipping")
+                        print(f"[warn] {os.path.abspath(file_path)}: Fragment ({x},{y}) at offset {offset}: too small ({len(fragment_data)} bytes), skipping")
                         continue
                 else:
                     # v3: recalculate total size from header fields
@@ -571,7 +570,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                     comp_size = frag_hdr[8]
 
                     if tw > img_w + 2 or th > img_h + 2:
-                        print(f"[warn] Fragment ({x},{y}) at offset {offset}: suspicious header (w={tw} h={th} op={op_verts} tr={tr_verts} flags={tile_flags:#06x} comp={comp_size}), file may be corrupted")
+                        print(f"[warn] {os.path.abspath(file_path)}: Fragment ({x},{y}) at offset {offset}: suspicious header (w={tw} h={th} op={op_verts} tr={tr_verts} flags={tile_flags:#06x} comp={comp_size}), file may be corrupted")
                         continue
 
                     vert_count = op_verts + tr_verts
@@ -612,7 +611,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                     try:
                         decoded_bytes = fmt.decompress(data_chunk)
                     except Exception as e:
-                        print(f"[warn] Fragment ({x},{y}): decompress failed: {e}")
+                        print(f"[warn] {os.path.abspath(file_path)}: Fragment ({x},{y}): decompress failed: {e}")
                         continue
                 else:
                     decoded_bytes = fragment_data[data_start:]
@@ -620,10 +619,14 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                 if not decoded_bytes:
                     continue
 
-                if tile_flags & 2:
-                    pixel_bytes = decode_dict_block(decoded_bytes, tw, th, tile_flags, do_swap=False)
-                else:
-                    pixel_bytes = decode_diff_block(decoded_bytes, tw, th)
+                try:
+                    if tile_flags & 2:
+                        pixel_bytes = decode_dict_block(decoded_bytes, tw, th, tile_flags, do_swap=False)
+                    else:
+                        pixel_bytes = decode_diff_block(decoded_bytes, tw, th)
+                except Exception as e:
+                    print(f"[warn] {os.path.abspath(file_path)}: Fragment ({x},{y}) w={tw} h={th} flags={tile_flags:#06x} comp={comp_size}: decode failed: {e}")
+                    continue
 
             if pixel_bytes:
                 try:
@@ -631,7 +634,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                     img.paste(tile_img, (x, y))
                     processed += 1
                 except Exception as e:
-                    print(f"[warn] Fragment ({x},{y}): image build failed: {e}")
+                    print(f"[warn] {os.path.abspath(file_path)}: Fragment ({x},{y}): image build failed: {e}")
 
         out_dir = os.path.dirname(output_path)
         if out_dir:
