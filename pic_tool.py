@@ -6,7 +6,7 @@ import os
 import binascii
 import argparse
 from io import BytesIO
-from typing import Optional, Callable
+from typing import Optional, Callable, NamedTuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import partial
@@ -222,13 +222,22 @@ def tile_has_alpha(img: Image.Image, x: int, y: int, w: int, h: int) -> bool:
     return False
 
 
-def slice_entries(img: Image.Image) -> list[dict]:
+def slice_entries(
+    img: Image.Image,
+    crop: bool = True,
+    canvas_w: Optional[int] = None,
+    canvas_h: Optional[int] = None,
+    offset_x: int = 0,
+    offset_y: int = 0,
+) -> list[dict]:
     w, h = img.size
-    bounds = content_bounds(img)
+    if canvas_w is None:
+        canvas_w, canvas_h = w, h
+    bounds = content_bounds(img) if crop else None
 
     if bounds:
-        bw, bh = bounds[2] - bounds[0], bounds[3] - bounds[1]
-        content_ratio = (bw * bh) / (w * h)
+        content_w, content_h = bounds[2] - bounds[0], bounds[3] - bounds[1]
+        content_ratio = (content_w * content_h) / (w * h)
     else:
         content_ratio = 0
 
@@ -247,14 +256,14 @@ def slice_entries(img: Image.Image) -> list[dict]:
                 for col in range(cols):
                     x = x_base + col * GRID_W
                     y = y_base + row * GRID_H
-                    tw = min(TILE_W, x_base + bw_adj - x + 2)
-                    th = min(TILE_H, y_base + bh_adj - y + 2)
+                    tw = min(TILE_W, x_base + bw_adj - x + 2, w - x)
+                    th = min(TILE_H, y_base + bh_adj - y + 2, h - y)
                     has_alpha = tile_has_alpha(img, x, y, tw, th)
                     entries.append({
                         'x': x, 'y': y, 'w': tw, 'h': th,
                         'tile_flags': 2 if has_alpha else 3,
                         'op_verts': 0, 'tr_verts': 1,
-                        'off_x': 0, 'off_y': 0,
+                        'offset_x': 0, 'offset_y': 0,
                     })
         else:
             has_alpha = tile_has_alpha(img, x_base, y_base, bw_adj, bh_adj)
@@ -262,7 +271,7 @@ def slice_entries(img: Image.Image) -> list[dict]:
                 'x': x_base, 'y': y_base, 'w': bw_adj, 'h': bh_adj,
                 'tile_flags': 2 if has_alpha else 3,
                 'op_verts': 0, 'tr_verts': 1,
-                'off_x': 0, 'off_y': 0,
+                'offset_x': 0, 'offset_y': 0,
             })
     else:
         cols = math.ceil(w / GRID_W)
@@ -271,21 +280,21 @@ def slice_entries(img: Image.Image) -> list[dict]:
             for col in range(cols):
                 x = col * GRID_W
                 y = row * GRID_H
-                tw = min(TILE_W, w - x + 2)
-                th = min(TILE_H, h - y + 2)
+                tw = min(TILE_W, w - x + (2 if offset_x + w == canvas_w else 0))
+                th = min(TILE_H, h - y + (2 if offset_y + h == canvas_h else 0))
                 has_alpha = tile_has_alpha(img, x, y, tw, th)
                 entries.append({
                     'x': x, 'y': y, 'w': tw, 'h': th,
                     'tile_flags': 2 if has_alpha else 3,
                     'op_verts': 0, 'tr_verts': 1,
-                    'off_x': 0, 'off_y': 0,
+                    'offset_x': 0, 'offset_y': 0,
                 })
 
     if not entries:
         entries.append({
             'x': 0, 'y': 0, 'w': w, 'h': h,
             'tile_flags': 3, 'op_verts': 0, 'tr_verts': 1,
-            'off_x': 0, 'off_y': 0,
+            'offset_x': 0, 'offset_y': 0,
         })
     return entries
 
@@ -302,7 +311,7 @@ class _PicFmt:
     entry_has_size: bool
     entry_size_first: bool
     frag_fmt: str
-    has_crc: bool
+    has_pid: bool
 
 
 _FMTS: dict[int, _PicFmt] = {
@@ -312,7 +321,7 @@ _FMTS: dict[int, _PicFmt] = {
         hdr_fmt='<IhhHHII',
         entry_fmt='<HHI', entry_has_size=False, entry_size_first=False,
         frag_fmt='<HHHHHHHHI',
-        has_crc=False,
+        has_pid=False,
     ),
     1: _PicFmt(
         version=1, do_swap=True, allow_diff_fallback=False,
@@ -321,7 +330,7 @@ _FMTS: dict[int, _PicFmt] = {
         hdr_fmt='<IIhhHHIII',
         entry_fmt='<HHI', entry_has_size=False, entry_size_first=False,
         frag_fmt='<HHHHHHHHI',
-        has_crc=True,
+        has_pid=True,
     ),
     2: _PicFmt(
         version=2, do_swap=False, allow_diff_fallback=True,
@@ -330,7 +339,7 @@ _FMTS: dict[int, _PicFmt] = {
         hdr_fmt='<IIhhHHIII',
         entry_fmt='<HHII', entry_has_size=True, entry_size_first=False,
         frag_fmt='<HHHHHHHHI',
-        has_crc=True,
+        has_pid=True,
     ),
     3: _PicFmt(
         version=3, do_swap=False, allow_diff_fallback=True,
@@ -339,24 +348,157 @@ _FMTS: dict[int, _PicFmt] = {
         hdr_fmt='<IIhhHHIII',
         entry_fmt='<IHHI', entry_has_size=True, entry_size_first=True,
         frag_fmt='<HHHHHHHHI',
-        has_crc=True,
+        has_pid=True,
     ),
 }
 
 
-def _pack(png_path: str, output_path: str, fmt: _PicFmt) -> bool:
+class _PicLayout(NamedTuple):
+    canvas_w: int
+    canvas_h: int
+    origin_x: int
+    origin_y: int
+    left: int
+    top: int
+    width: int
+    height: int
+    pid: Optional[int] = None
+
+
+def _read_pic_layout(file_path: str) -> Optional[_PicLayout]:
+    try:
+        version = detect_pic_version(file_path)
+    except (ValueError, OSError):
+        return None
+    fmt = _FMTS.get(version)
+    if fmt is None:
+        return None
+    try:
+        with open(file_path, "rb") as f:
+            f.read(4)
+            hdr = f.read(struct.calcsize(fmt.hdr_fmt))
+            if len(hdr) < struct.calcsize(fmt.hdr_fmt):
+                return None
+            fields = struct.unpack(fmt.hdr_fmt, hdr)
+            if fmt.version == 0:
+                _, origin_x, origin_y, canvas_w, canvas_h, _f20, entry_count = fields
+                pid = None
+            else:
+                _version, _file_size, origin_x, origin_y, canvas_w, canvas_h, _f20, entry_count, pid = fields
+
+            entry_size = struct.calcsize(fmt.entry_fmt)
+            entries = []
+            for _ in range(entry_count):
+                raw = f.read(entry_size)
+                if len(raw) < entry_size:
+                    break
+                entries.append(struct.unpack(fmt.entry_fmt, raw))
+    except OSError:
+        return None
+
+    file_size = os.path.getsize(file_path)
+    left = top = 10 ** 9
+    right = bottom = -1
+    found = False
+    with open(file_path, "rb") as f:
+        for e in entries:
+            if not fmt.entry_has_size:
+                x, y, offset = e
+                frag_size = None
+            elif fmt.entry_size_first:
+                _sz, x, y, offset = e
+                frag_size = _sz
+            else:
+                x, y, offset, frag_size = e
+            if offset >= file_size:
+                continue
+            if fmt.version == 2 and (frag_size is None or frag_size == 0):
+                continue
+            try:
+                f.seek(offset)
+                frag_hdr = f.read(20)
+                if len(frag_hdr) < 20:
+                    continue
+                h = struct.unpack(fmt.frag_fmt, frag_hdr)
+                tw, th = h[6], h[7]
+            except OSError:
+                continue
+            left = min(left, x)
+            top = min(top, y)
+            right = max(right, x + tw)
+            bottom = max(bottom, y + th)
+            found = True
+
+    if not found:
+        return None
+    right = min(right, canvas_w)
+    bottom = min(bottom, canvas_h)
+    return _PicLayout(canvas_w, canvas_h, origin_x, origin_y, left, top, right - left, bottom - top, pid)
+
+
+def build_layout_map(orig_paths: list[str]) -> dict[str, _PicLayout]:
+    layout_map: dict[str, _PicLayout] = {}
+    for p in orig_paths:
+        if os.path.isfile(p):
+            layout = _read_pic_layout(p)
+            if layout is not None:
+                layout_map[os.path.basename(p).replace("\\", "/")] = layout
+        elif os.path.isdir(p):
+            for root, dirs, files in os.walk(p):
+                for file in files:
+                    if file.lower().endswith(".pic"):
+                        full = os.path.join(root, file)
+                        rel = os.path.relpath(full, p).replace("\\", "/")
+                        layout = _read_pic_layout(full)
+                        if layout is not None:
+                            layout_map[rel] = layout
+        else:
+            print(f"[warn] --orig path not found: {p}")
+    return layout_map
+
+
+def _pack(
+    png_path: str,
+    output_path: str,
+    fmt: _PicFmt,
+    origin: Optional[tuple[int, int]] = None,
+    layout: Optional[_PicLayout] = None,
+) -> bool:
     img = Image.open(png_path).convert("RGBA")
     img_w, img_h = img.size
+
+    offset_x = offset_y = 0
+    canvas_w, canvas_h = img_w, img_h
+    is_actual_size = False
+    if layout is not None:
+        if (img_w, img_h) == (layout.width, layout.height):
+            # Input is the merged content region: place it back at the original position
+            offset_x, offset_y = layout.left, layout.top
+            canvas_w, canvas_h = layout.canvas_w, layout.canvas_h
+            origin = (layout.origin_x, layout.origin_y)
+            is_actual_size = True
+        elif (img_w, img_h) == (layout.canvas_w, layout.canvas_h):
+            # Full-canvas image: keep old behavior, restore origin from original header
+            origin = (layout.origin_x, layout.origin_y)
+        else:
+            print(f"[skip] {os.path.abspath(png_path)}: image size {img_w}x{img_h} "
+                  f"does not match original canvas {layout.canvas_w}x{layout.canvas_h} "
+                  f"or actual size {layout.width}x{layout.height}")
+            return False
 
     if not fmt.allow_diff_fallback:
         colors = img.getcolors(maxcolors=257)
         if colors is None or len(colors) > 256:
             img = quantize_rgba(png_path)
 
-    entries = slice_entries(img)
+    entries = slice_entries(img, crop=not is_actual_size,
+                            canvas_w=canvas_w, canvas_h=canvas_h, offset_x=offset_x, offset_y=offset_y)
     fragments: list[dict] = []
-    crc_data = bytearray()
-    origin_x, origin_y = img_w // 2, img_h // 2
+    pid_data = bytearray()
+    if origin is None:
+        origin_x, origin_y = img_w // 2, img_h // 2
+    else:
+        origin_x, origin_y = origin
 
     for info in entries:
         tw, th = info['w'], info['h']
@@ -381,24 +523,23 @@ def _pack(png_path: str, output_path: str, fmt: _PicFmt) -> bool:
         comp_size = len(compressed) if len(compressed) < len(encoded_bytes) else 0
 
         vert_count = info['op_verts'] + info['tr_verts']
-        data_off_no_align = 20 + vert_count * 8
-        data_align = (0x10 - data_off_no_align % 0x10) % 0x10
+        data_offset_no_align = 20 + vert_count * 8
+        data_align = (0x10 - data_offset_no_align % 0x10) % 0x10
         alignment = data_align // 2
 
         frag = bytearray()
         frag.extend(struct.pack(fmt.frag_fmt,
             tile_flags, info['op_verts'], info['tr_verts'], alignment,
-            info['off_x'], info['off_y'], tw, th, comp_size))
+            info['offset_x'], info['offset_y'], tw, th, comp_size))
         mask_rect = struct.pack("<HHHH", 0, 0, tw - 2, th - 2)
         frag.extend(mask_rect * vert_count)
         frag.extend(b'\x00' * data_align)
         frag.extend(compressed if comp_size > 0 else encoded_bytes)
 
-        if fmt.has_crc:
-            crc_data.extend(frag)
-        fragments.append({'x': info['x'], 'y': info['y'], 'data': frag})
+        if fmt.has_pid:
+            pid_data.extend(frag)
+        fragments.append({'x': info['x'] + offset_x, 'y': info['y'] + offset_y, 'data': frag})
 
-    # Assemble output file
     entry_size = struct.calcsize(fmt.entry_fmt)
     hdr_field_size = struct.calcsize(fmt.hdr_fmt)
     header_size = 4 + hdr_field_size + len(fragments) * entry_size
@@ -425,17 +566,20 @@ def _pack(png_path: str, output_path: str, fmt: _PicFmt) -> bool:
     file_size = len(out)
 
     # Write header fields
-    if fmt.has_crc:
-        crc_val = binascii.crc32(crc_data) & 0xFFFFFFFF
-        if crc_val == 0:
-            crc_val = 1
+    if fmt.has_pid:
+        if layout is not None and layout.pid is not None:
+            pid = layout.pid
+        else:
+            pid = binascii.crc32(pid_data) & 0xFFFFFFFF
+            if pid == 0:
+                pid = 1
     else:
-        crc_val = 0
+        pid = 0
 
     if fmt.version == 0:
-        hdr_bytes = struct.pack(fmt.hdr_fmt, file_size, origin_x, origin_y, img_w, img_h, 1, len(fragments))
+        hdr_bytes = struct.pack(fmt.hdr_fmt, file_size, origin_x, origin_y, canvas_w, canvas_h, 1, len(fragments))
     else:
-        hdr_bytes = struct.pack(fmt.hdr_fmt, fmt.version, file_size, origin_x, origin_y, img_w, img_h, 1, len(fragments), crc_val)
+        hdr_bytes = struct.pack(fmt.hdr_fmt, fmt.version, file_size, origin_x, origin_y, canvas_w, canvas_h, 1, len(fragments), pid)
     out[4:4 + hdr_field_size] = hdr_bytes
 
     # Write entry table
@@ -476,7 +620,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
         if fmt.version == 0:
             _, origin_x, origin_y, img_w, img_h, hdr_flags, entry_count = hdr_fields
         else:
-            hdr_version, _, origin_x, origin_y, img_w, img_h, hdr_flags, entry_count, hdr_crc = hdr_fields
+            hdr_version, _, origin_x, origin_y, img_w, img_h, hdr_flags, entry_count, hdr_pid = hdr_fields
 
         # Read entry table
         entry_size = struct.calcsize(fmt.entry_fmt)
@@ -496,7 +640,34 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                 x, y, offset, frag_size = fields
                 entries.append((x, y, offset, frag_size))
 
-        img = Image.new("RGBA", (img_w, img_h))
+        left = top = 10 ** 9
+        right = bottom = -1
+        found = False
+        for x, y, offset, frag_size in entries:
+            if offset >= file_size:
+                continue
+            if fmt.version == 2 and (frag_size is None or frag_size == 0):
+                continue
+            f.seek(offset)
+            frag_hdr = f.read(20)
+            if len(frag_hdr) < 20:
+                continue
+            h = struct.unpack(fmt.frag_fmt, frag_hdr)
+            tw, th = h[6], h[7]
+            left = min(left, x)
+            top = min(top, y)
+            right = max(right, x + tw)
+            bottom = max(bottom, y + th)
+            found = True
+
+        if found:
+            right = min(right, img_w)
+            bottom = min(bottom, img_h)
+        if found and right > left and bottom > top:
+            img = Image.new("RGBA", (right - left, bottom - top))
+        else:
+            img = Image.new("RGBA", (img_w, img_h))
+            left = top = 0
         processed = 0
 
         for i, (x, y, offset, frag_size) in enumerate(entries):
@@ -504,14 +675,13 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                 continue
 
             if fmt.version in (0, 1):
-                # Sequential read
                 f.seek(offset)
                 tile_data = f.read(20)
                 if len(tile_data) < 20:
                     continue
 
                 hdr = struct.unpack(fmt.frag_fmt, tile_data)
-                tile_flags, op_verts, tr_verts, alignment, off_x, off_y, tw, th = hdr[:8]
+                tile_flags, op_verts, tr_verts, alignment, offset_x, offset_y, tw, th = hdr[:8]
                 comp_size = hdr[8]
 
                 if tw > img_w + 2 or th > img_h + 2:
@@ -566,7 +736,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                     if len(frag_hdr_bytes) < 20:
                         continue
                     frag_hdr = struct.unpack(fmt.frag_fmt, frag_hdr_bytes)
-                    tile_flags, op_verts, tr_verts, alignment, off_x, off_y, tw, th = frag_hdr[:8]
+                    tile_flags, op_verts, tr_verts, alignment, offset_x, offset_y, tw, th = frag_hdr[:8]
                     comp_size = frag_hdr[8]
 
                     if tw > img_w + 2 or th > img_h + 2:
@@ -594,9 +764,8 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
                     f.seek(offset)
                     fragment_data = f.read(frag_total)
 
-                # Parse fragment buffer
                 hdr = struct.unpack(fmt.frag_fmt, fragment_data[:20])
-                tile_flags, op_verts, tr_verts, alignment, off_x, off_y, tw, th = hdr[:8]
+                tile_flags, op_verts, tr_verts, alignment, offset_x, offset_y, tw, th = hdr[:8]
                 comp_size = hdr[8]
 
                 vert_count = op_verts + tr_verts
@@ -631,7 +800,7 @@ def _unpack(file_path: str, output_path: str, fmt: _PicFmt) -> bool:
             if pixel_bytes:
                 try:
                     tile_img = Image.frombytes("RGBA", (tw, th), bytes(pixel_bytes))
-                    img.paste(tile_img, (x, y))
+                    img.paste(tile_img, (x - left, y - top))
                     processed += 1
                 except Exception as e:
                     print(f"[warn] {os.path.abspath(file_path)}: Fragment ({x},{y}): image build failed: {e}")
@@ -664,12 +833,18 @@ def unpack_pic(file_path: str, output_path: str) -> bool:
     return _unpack(file_path, output_path, fmt)
 
 
-def pack_pic(png_path: str, output_path: str, pic_version: int) -> bool:
+def pack_pic(
+    png_path: str,
+    output_path: str,
+    pic_version: int,
+    origin: Optional[tuple[int, int]] = None,
+    layout: Optional[_PicLayout] = None,
+) -> bool:
     fmt = _FMTS.get(pic_version)
     if fmt is None:
         print(f"[skip] unsupported PIC version: {pic_version}")
         return False
-    return _pack(png_path, output_path, fmt)
+    return _pack(png_path, output_path, fmt, origin, layout)
 
 
 def unpack(input_path: str, output_path: str) -> None:
@@ -715,15 +890,28 @@ def unpack(input_path: str, output_path: str) -> None:
         print(f"processed: {count} file(s)")
 
 
-def pack(input_path: str, output_path: str, pic_version: int = 1) -> None:
+def pack(
+    input_path: str,
+    output_path: str,
+    pic_version: int = 1,
+    orig: Optional[list[str]] = None,
+) -> None:
     abs_input = os.path.abspath(input_path)
+    layout_map = build_layout_map(orig or [])
 
     if os.path.isfile(abs_input):
         out_path = output_path
         name = os.path.splitext(os.path.basename(abs_input))[0]
         if not output_path.endswith(".pic"):
             out_path = os.path.join(output_path, name + ".pic")
-        pack_pic(abs_input, out_path, pic_version)
+        if len(orig) != 1 or not os.path.isfile(orig[0]):
+            print(f"[skip] single file input requires --orig to be a single .pic file")
+            return
+        layout = _read_pic_layout(orig[0])
+        if layout is None:
+            print(f"[warn] failed to read layout from {orig[0]}; "
+                  f"canvas will be the PNG size (merged images will be misplaced)")
+        pack_pic(abs_input, out_path, pic_version, None, layout)
 
     elif os.path.isdir(abs_input):
         output_dir = output_path
@@ -739,20 +927,29 @@ def pack(input_path: str, output_path: str, pic_version: int = 1) -> None:
                     rel = os.path.relpath(root, abs_input)
                     if rel == '.':
                         dst = os.path.join(output_dir, name + ".pic")
+                        key = name + ".pic"
                     else:
                         dst = os.path.join(output_dir, rel, name + ".pic")
-                    tasks.append((src, dst))
+                        key = os.path.join(rel, name + ".pic").replace("\\", "/")
+                    layout = layout_map.get(key) if layout_map else None
+                    if layout is None:
+                        print(f"[warn] no original layout found for {key}; "
+                              f"canvas will be the PNG size (merged images will be misplaced), pass --orig to fix")
+                    tasks.append((src, dst, layout))
 
         count = 0
         if len(tasks) > 1:
             with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-                fut_to_name = {executor.submit(pack_pic, png, dst, pic_version): png for png, dst in tasks}
+                fut_to_name = {
+                    executor.submit(pack_pic, png, dst, pic_version, None, layout): png
+                    for png, dst, layout in tasks
+                }
                 for fut in as_completed(fut_to_name):
                     if fut.result():
                         count += 1
         else:
-            for png, dst in tasks:
-                if pack_pic(png, dst, pic_version):
+            for png, dst, layout in tasks:
+                if pack_pic(png, dst, pic_version, None, layout):
                     count += 1
 
         print(f"processed: {count} file(s)")
@@ -769,14 +966,15 @@ if __name__ == "__main__":
     pack_p = sub.add_parser("pack", help="Convert PNG to PIC")
     pack_p.add_argument("-i", "--input", required=True, help="Input .png file or directory")
     pack_p.add_argument("-o", "--output", required=True, help="Output .pic file or directory")
-    pack_p.add_argument("-v", "--version", type=int, choices=[0, 1, 2, 3], required=True,
-                        help="PIC version: 0, 1, 2, 3")
+    pack_p.add_argument("-v", "--version", type=int, choices=[0, 1, 2, 3], required=True, help="PIC version: 0, 1, 2, 3")
+    pack_p.add_argument("--orig", required=True, help="Original .pic file or directory for layout reference")
 
     args = parser.parse_args()
 
     if args.command == "unpack":
         unpack(args.input, args.output)
     elif args.command == "pack":
-        pack(args.input, args.output, args.version)
+        orig_list = [s.strip() for s in args.orig.split(",") if s.strip()] if args.orig else None
+        pack(args.input, args.output, args.version, orig_list)
     else:
         parser.print_help()
