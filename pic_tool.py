@@ -282,6 +282,8 @@ def slice_entries(
                 y = row * GRID_H
                 tw = min(TILE_W, w - x + (2 if offset_x + w == canvas_w else 0))
                 th = min(TILE_H, h - y + (2 if offset_y + h == canvas_h else 0))
+                if tw < 2 or th < 2:
+                    continue
                 has_alpha = tile_has_alpha(img, x, y, tw, th)
                 entries.append({
                     'x': x, 'y': y, 'w': tw, 'h': th,
