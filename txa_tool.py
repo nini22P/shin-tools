@@ -396,8 +396,7 @@ def pack_txa(source_dir: str, output_path: str, version: int = 2) -> bool:
 
             max_decomp_size = max(max_decomp_size, decomp_size)
 
-            status = f"compressed ({decomp_size}->{comp_size})" if use_comp else f"uncompressed ({decomp_size})"
-            print(f"  [{i:03}] {name} ({img.width}x{img.height}) {status}")
+            print(f"  [{i:03}] {name} ({img.width}x{img.height})")
 
         file_size = f.tell()
         aligned_size = (file_size + 15) & ~15
